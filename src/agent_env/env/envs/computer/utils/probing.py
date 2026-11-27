@@ -166,7 +166,7 @@ async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: Compute
     for link in links:
         try:
             booted = await boot.boot(link, image=image, port=driver.port, environment=environment, token=token,
-                                     network_policy=None, timeout=_PROBE_TTL_S, attribution=None,
+                                     card=None, network_policy=None, timeout=_PROBE_TTL_S, attribution=None,
                                      ready_s=boot.ready_timeout(env.composed_apps(), platform_of(env.computer.os)),
                                      form=form, platform=platform_of(env.computer.os), shm_mb=env.shm_mb())
         except Exception as e:

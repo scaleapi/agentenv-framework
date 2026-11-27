@@ -57,6 +57,7 @@ class JudgeUsage(StepUsage):
         self.loaded: list[dict[str, Any]] = []
         self.sources: Optional[list[dict[str, Any]]] = None
         self.uploads = Uploads()
+        self._staged_in: dict[str, list[dict[str, Any]]] = {}
         self._deferred: list[tuple[dict[str, Any], AgentInput]] = []
 
     def call(self, role: ModelRole, usage: Optional[Usage], *, model: Optional[str], endpoint_host: Optional[str],
@@ -88,13 +89,17 @@ class JudgeUsage(StepUsage):
         """``body`` as the JSON a direct call was sent, uploaded: its reference."""
         return await self.uploads.put_json(body)
 
-    def agent_input(self, message: str) -> AgentInput:
-        """What an agent call is sent now: its message, the files staged so far and the task's loads into the judge."""
-        return AgentInput(message, list(self.staged), list(self.loaded))
+    def agent_input(self, message: str, sandbox_id: Optional[str] = None) -> AgentInput:
+        """What an agent call is sent now: its message, the files staged so far in its judge's sandbox
+        (``sandbox_id``; every one staged, without) and the task's loads into the judge."""
+        files = self._staged_in[sandbox_id] if sandbox_id in self._staged_in else self.staged
+        return AgentInput(message, list(files), list(self.loaded))
 
-    def recording(self, sandbox: Any) -> StagingRecorder:
-        """``sandbox``, every file written into it kept in ``staged``."""
-        return StagingRecorder(sandbox, self.staged, self.uploads)
+    def recording(self, sandbox: Any, sandbox_id: Optional[str] = None) -> StagingRecorder:
+        """``sandbox``, every file written into it kept in ``staged`` and, when it's named, in its own sandbox's list,
+        which the calls to that sandbox's judge name, as when each sample has a judge of its own."""
+        manifests = (self.staged,) if sandbox_id is None else (self.staged, self._staged_in.setdefault(sandbox_id, []))
+        return StagingRecorder(sandbox, manifests, self.uploads)
 
     async def settle(self) -> None:
         """Waits, up to ``SETTLE_SECONDS`` all told, for the run's uploads; stores each agent call's input once its
@@ -132,7 +137,7 @@ class JudgeUsage(StepUsage):
                          reported_by=reported_by).fields()
         record = {"outcome": outcome, "model": model, "endpoint_host": endpoint_host,
                   "usage": usage.to_dict() if usage is not None else None, **cost,
-                  "batch": _BATCH.get(), "attempt": _ATTEMPT.get(),
+                  "batch": _BATCH.get(), "sample": _SAMPLE.get(), "attempt": _ATTEMPT.get(),
                   **({"input": dict(sent)} if isinstance(sent, Mapping) else {}),
                   **({"error": error} if error is not None else {})}
         self.calls.append(record)
@@ -142,6 +147,7 @@ class JudgeUsage(StepUsage):
 
 _RUN: ContextVar[Optional[JudgeUsage]] = ContextVar("judge_run", default=None)
 _BATCH: ContextVar[Optional[int]] = ContextVar("judge_batch", default=None)
+_SAMPLE: ContextVar[Optional[int]] = ContextVar("judge_sample", default=None)
 _ATTEMPT: ContextVar[Optional[int]] = ContextVar("judge_attempt", default=None)
 
 
@@ -177,6 +183,11 @@ def calls() -> list[dict[str, Any]]:
 def batch(number: Optional[int]) -> None:
     """The judge batch the calls made from here in this task belong to (None for a run in one batch)."""
     _BATCH.set(number)
+
+
+def sample(number: Optional[int]) -> None:
+    """The judge sample the calls made from here in this task belong to (None for a run that takes one)."""
+    _SAMPLE.set(number)
 
 
 def attempt(number: int) -> None:

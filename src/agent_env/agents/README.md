@@ -31,7 +31,8 @@ selection picks the CLI's own tools: `{"disable": "*"}` and `{"only": [...]}` be
 turn off becomes `--disallowedTools`, which keeps the CLI's defaults for the rest, and any selection adds
 `--strict-mcp-config`, so its MCP servers are only the task env's. A `deploy_agent` `peer_tools: false` also leaves out the peer_agents MCP
 server, so the agent can't message the task's other agents; an agent whose agent-config takes no `peer_tools` fails
-the deploy. Tool search is off unless the agent's environment sets
+the deploy. A `deploy_agent` `web_tools: false` adds `WebSearch` and `WebFetch` to `--disallowedTools`, whatever
+`builtin_tools` selects. Tool search is off unless the agent's environment sets
 `ENABLE_TOOL_SEARCH`, so the CLI sends the env's tools and its own up front. The names are `ClaudeCodeTool`'s in
 `claude_bridge.py`: every tool the pinned CLI has, though which it offers by default depends on the model. A test fails
 when the Dockerfile's `CLAUDE_CODE_VERSION` moves, until `ClaudeCodeTool` and `TOOLS_CLI_VERSION` move with it.
@@ -61,6 +62,11 @@ The A2A server starts with the real-time marker, so it and its records stay on r
   websearch tool's year, and the CLI enables no provider but the endpoint, so no call bypasses the relay. A call whose
   date the relay can't read or place is refused, so the turn fails rather than tell the model the machine's date
   (`opencode_date.py`).
+- **Antigravity's harness on real time.** The Antigravity SDK's harness is a static Go binary, which libfaketime can't
+  reach, so it keeps real time while the commands it runs read the env's. While the clock is armed, the turn's model
+  relay puts the env's time, read from `date`, in the "The current local time is" line the harness opens each user
+  message with, and keeps the time each turn was given, so a resumed conversation's history doesn't change
+  (`antigravity_date.py`). A call whose time it can't read is refused.
 - **For the rest of the run.** An agent that follows goes on following: a later `sync_env_clock` without `agent_clock`
   re-arms the clock it follows, and only agents that never followed keep real time.
 - **Through the egress proxy.** While the agent follows an armed clock, the CLI goes out through the egress proxy, which
@@ -69,12 +75,17 @@ The A2A server starts with the real-time marker, so it and its records stay on r
   hosts it reaches by plain HTTP alone, which have no certificate to check, go direct. `NO_PROXY` goes by host, not
   scheme, so a host the agent also reaches over TLS stays behind the proxy. The image's proxy reaches private networks
   too (`AGENTENV_EGRESS_PRIVATE`), so a host over TLS at a private address works at any date as well. Unarmed, the page
-  holds real time and the CLI goes out directly.
+  holds real time and the CLI goes out directly. Which way it goes is settled when the bridge starts the CLI, so a clock
+  armed while a CLI runs reaches its proxy settings with the next one: arm the clock before the turn that needs it.
 - **One rule for every clocked agent.** That rule is `agent_egress.py` in `utils/agent_clock`, which only agent images
   take (`agent_clock = "utils/agent_clock"` in `shared_sources.toml`), so changing it rebuilds no computer base. The
   bridge imports it, and the image and `install.sh` copy it beside the bridge with the clock's `clockpage.py`, whose
-  layout and check it reads the page by, so every agent put on the clock, OpenCode's and Letta Code's too, goes out
-  the same way.
+  layout and check it reads the page by, so every agent put on the clock, OpenCode's, Letta Code's, Antigravity's and
+  Codex's too, goes out the same way.
+- **Codex's CLI on real time.** The Codex CLI is a static binary, which the preloaded library never reaches, so it
+  keeps real time whatever the clock; the commands it runs read the env's time. While the clock is armed, each CLI
+  run's model relay puts the env's date, read from `date`, where the CLI writes its own, and refuses a call it can't date
+  (`codex_date.py`).
 
 Started as a user other than root, the image runs the A2A server alone, on real time, as before.
 
@@ -115,8 +126,17 @@ framework: each turn is one `opencode run --format json` run, resumed in the con
 MCP servers go to the run's own inline config, and its JSON events are the turn's trajectory. Name it as `opencode`, its
 alias, or by its id, `@local/agentenv-framework/agents/opencode`. It calls the `[model]` endpoint as an
 OpenAI-compatible one, `<base>/v1/chat/completions`, and takes its model from the prompt, else
-`anthropic/claude-sonnet-4-6`. It declares `install/v1` too, into a container or onto a `vm` sandbox's Linux host,
+`anthropic/claude-sonnet-5-5`. It declares `install/v1` too, into a container or onto a `vm` sandbox's Linux host,
 with glibc. Its folder's `README.md` covers the extensions it implements.
+
+`agents/antigravity/` runs Google's [Antigravity SDK](https://pypi.org/project/google-antigravity/) behind the
+protocol's A2A agent framework, in process rather than a CLI: each turn is one `Agent.chat()` of the SDK, resumed in the
+context's SDK conversation, the task env's MCP servers are its streamable-HTTP servers, and its streamed steps, with each
+tool call's result from the SDK's hooks, are the turn's trajectory. Name it as `antigravity`, its alias, or by its id,
+`@local/agentenv-framework/agents/antigravity`. Its harness calls the `[model]` endpoint as an OpenAI-compatible one,
+`<base>/v1/chat/completions`, through a relay that adds the key and the run's attribution and counts usage, and takes
+its model from the prompt, else `anthropic/claude-sonnet-5-5`. It declares `install/v1` too, into a container or onto a
+`vm` sandbox's Linux host, with glibc. Its folder's `README.md` covers the extensions it implements.
 
 `agents/letta-code/` runs [Letta Code](https://github.com/letta-ai/letta-code) behind the protocol's A2A agent
 framework: each turn is one `letta --backend local -p --output-format stream-json` run, resumed in the context's
@@ -160,8 +180,8 @@ it as `hermes`, its alias, or by its id, `@local/agentenv-framework/agents/herme
 an OpenAI-compatible one, `<base>/v1/chat/completions`, and takes its model from the prompt, else
 `anthropic/claude-sonnet-4-6`. Its folder's `README.md` covers the extensions it implements.
 
-A release publishes Codex's, Gemini's, Hermes', OpenCode's, pi's, OpenHands' and Pydantic AI's images too, at
-`ghcr.io/scaleapi/agentenv-codex:src-<hex>`, `ghcr.io/scaleapi/agentenv-gemini:src-<hex>`,
+A release publishes Antigravity's, Codex's, Gemini's, Hermes', OpenCode's, pi's, OpenHands' and Pydantic AI's images
+too, at `ghcr.io/scaleapi/agentenv-antigravity:src-<hex>`, `ghcr.io/scaleapi/agentenv-codex:src-<hex>`, `ghcr.io/scaleapi/agentenv-gemini:src-<hex>`,
 `ghcr.io/scaleapi/agentenv-hermes:src-<hex>`, `ghcr.io/scaleapi/agentenv-opencode:src-<hex>`, `ghcr.io/scaleapi/agentenv-pi:src-<hex>`,
 `ghcr.io/scaleapi/agentenv-openhands:src-<hex>` and `ghcr.io/scaleapi/agentenv-pydantic-ai:src-<hex>`, each built again only when its folder changes, and a run deploys
 them as it does Claude Code's: it pulls the image
@@ -179,4 +199,4 @@ others'. It has no alias and no smoke task: with nobody driving it, a prompt onl
 
 `agent-env run agents` runs every agent's smoke task, pulling or building each image; `--task claude-code-smoke` runs
 Claude Code's alone, `--task codex-smoke` Codex's, `--task gemini-smoke` Gemini's, `--task hermes-smoke` Hermes', `--task opencode-smoke` OpenCode's,
-`--task pi-smoke` pi's, `--task openhands-smoke` OpenHands', `--task pydantic-ai-smoke` Pydantic AI's.
+`--task antigravity-smoke` Antigravity's, `--task pi-smoke` pi's, `--task openhands-smoke` OpenHands', `--task pydantic-ai-smoke` Pydantic AI's.

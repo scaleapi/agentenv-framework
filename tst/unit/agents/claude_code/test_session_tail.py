@@ -148,7 +148,7 @@ def test_run_claude_feeds_a_turns_transcript_records_and_each_resumed_attempts_e
     events: list = []
     result = asyncio.run(claude_bridge.run_claude(
         prompt="p", session_id="sess-1", resume=True, event_callback=lambda e: events.append(("stdout", e)),
-        aux_callback=lambda name, record: events.append((name, record)), tool_shapes=(shapes := set())))
+        aux_callback=lambda name, record: events.append((name, record)), tool_shapes=(shapes := set()), web_tools=True))
     fed = [(name, record.get("uuid") or record.get("subtype")) for name, record in events if name != "stdout"]
     assert result.attempts == 2
     assert fed == [("session", "u1"), ("tools", None), ("attempt", "success"), ("session", "u2")]
@@ -160,7 +160,8 @@ def test_run_claude_feeds_a_turns_transcript_records_and_each_resumed_attempts_e
 def test_run_claude_without_an_aux_callback_reads_no_transcript(scripted, monkeypatch):  # noqa: F811
     scripted["queue"].append((_event(type="result", subtype="success", result="done").encode(), 0))
     monkeypatch.setattr(claude_bridge, "SessionTail", None)
-    assert asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False)).response == "done"
+    assert asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False,
+                                                web_tools=True)).response == "done"
 
 
 @pytest.fixture
@@ -184,14 +185,15 @@ def test_a_task_that_builds_no_atif_copy_feeds_nothing_beside_stdout(turns, clie
     assert "aux_callback" not in turns[0] and "tool_shapes" not in turns[0]
 
 
-def test_a_task_that_builds_an_atif_copy_is_fed_its_records_and_the_turns_cost(turns, client):
+def test_a_task_that_builds_an_atif_copy_is_fed_its_records_and_the_turns_cost_and_counts(turns, client):
     client.post("/ext/trajectory/prescribe", json={"formats": ["atif/1"]}).raise_for_status()
     task = send(client, "hello", context_id="ctx-a")
     assert terminal(task)[0] == "completed"
     assert callable(turns[0]["aux_callback"]) and turns[0]["tool_shapes"] == set()
     read = client.post("/ext/trajectory", json={"task_id": task["id"], "format": "atif/1"}).json()
-    assert {"name": "turn", "record": {"type": "turn", "cost_usd": 0.25}} in [
-        {key: entry[key] for key in ("name", "record")} for entry in read["aux"]]
+    [turn] = [entry["record"] for entry in read["aux"] if entry["name"] == "turn"]
+    assert turn["cost_usd"] == 0.25
+    assert {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"} <= set(turn)
     assert read["trajectory"]["final_metrics"]["total_cost_usd"] == 0.25
 
 

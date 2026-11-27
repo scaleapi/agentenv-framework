@@ -217,10 +217,10 @@ class A2AAgent:
 
     @staticmethod
     def tool_settings(card: dict) -> dict:
-        """The agent's own-tool selection and peer-tools setting as deploy_agent stamped them on its card
-        (``builtin_tools``, ``peer_tools``); only the ones set. Sent again with each conversation's config, so an
-        agent that restarted since its deploy doesn't get its tools back."""
-        return {k: card[k] for k in ("builtin_tools", "peer_tools") if card.get(k) is not None}
+        """The agent's own-tool selection, peer-tools and web-tools settings as deploy_agent stamped them on its card
+        (``builtin_tools``, ``peer_tools``, ``web_tools``); only the ones set. Sent again with each conversation's
+        config, so an agent that restarted since its deploy doesn't get its tools back."""
+        return {k: card[k] for k in ("builtin_tools", "peer_tools", "web_tools") if card.get(k) is not None}
 
     @staticmethod
     def negotiate_agent_config(card: dict, desired: dict) -> Optional[NegotiatedAgentConfig]:

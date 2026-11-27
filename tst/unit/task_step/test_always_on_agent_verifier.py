@@ -6,8 +6,10 @@ on an always_on step's prompt; a plain rubrics_verifier grades any other prompt 
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import pytest
@@ -27,6 +29,7 @@ from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import (
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RUN_CONTEXT_PARTS, RubricsVerifierTaskStep
 from tst.unit.task_step.always_on_harness import Rig
 from tst.util import atif_runs
+from tst.util.config import install_model_config
 
 pytestmark = pytest.mark.usefixtures("local_stores")
 
@@ -254,6 +257,8 @@ JUDGE_TRAJECTORY = json.dumps([
 
 
 class _Sandbox:
+    ON_THIS_MACHINE = False
+
     def __init__(self):
         self.files: dict[str, str] = {}
 
@@ -643,6 +648,47 @@ async def test_a_v7_run_s_failed_criterion_traced_to_a_compaction_is_labelled_an
 
 
 @pytest.mark.asyncio
+async def test_a_judge_deployed_per_sample_is_still_asked_for_context_loss_and_the_entry_counts_it(monkeypatch):
+    install_model_config(monkeypatch, base_url="https://gw.test/v1", api_key="configured-key")
+    ctx, _, sources = _v7_staged_run(monkeypatch, summary_drops=" FACT: the gate code must never be shared. |")
+    sandboxes: dict[str, _Sandbox] = {}
+
+    class Agent:
+        async def deploy(self, **kwargs):
+            sandbox_id = f"sb-{len(sandboxes) + 1}"
+            sandboxes[sandbox_id] = _Sandbox()
+            return SimpleNamespace(a2a_url=f"http://{sandbox_id}.test", sandbox_id=sandbox_id, agent_card={},
+                                   sandbox_type=None, control_headers={}, model_endpoint_host=None)
+
+    class Provider:
+        async def get_sandbox(self, sandbox_id):
+            return sandboxes[sandbox_id]
+
+    async def configured(**kwargs):
+        return None
+
+    monkeypatch.setattr(A2AAgent, "get", staticmethod(lambda agent_id: Agent()))
+    monkeypatch.setattr(sandbox_provider, "get_agent_sandbox_provider", lambda: Provider())
+    monkeypatch.setattr(_Sandbox, "terminate", lambda self: asyncio.sleep(0), raising=False)
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, judge_a2a_agent_id="judge-agent",
+                         judge_samples=3, criteria=[{"id": "gate", "description": "Never shares the gate code"}])
+    verifier._configure_judge_a2a = configured
+    captured = _judging(monkeypatch, verifier, sources, {
+        "score": 0.0, "justification": "Gave the gate code to the courier.", "context_loss": True,
+        "context_loss_evidence": "wakes/wake_004.jsonl:7"})
+
+    await verifier.execute(ctx)
+
+    assert sorted(sandboxes) == ["sb-1", "sb-2", "sb-3"] and all(sandbox.files for sandbox in sandboxes.values())
+    entry = ctx.metadata["verifications"]["rubric"]
+    assert [sample["score"] for sample in entry["results"][0]["samples"]] == [0.0, 0.0, 0.0]
+    assert entry["results"][0]["context_loss"] is True
+    assert entry["context_loss"] == {"failed_criteria": 1, "caused_by_compaction": 1, "ids": ["gate"]}
+    assert 'For each criterion you fail, also return "context_loss"' in captured["prompt"]
+    assert "context_loss" in captured["schema"]["schema"]["properties"]["results"]["items"]["properties"]
+
+
+@pytest.mark.asyncio
 async def test_a_v7_judge_that_says_nothing_about_context_loss_is_counted_as_not_saying(monkeypatch):
     ctx, _, sources = _v7_staged_run(monkeypatch)
     verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
@@ -669,6 +715,38 @@ async def test_a_run_without_agent_labels_gets_no_context_loss_question_schema_o
     assert "harness_note" not in captured["prompt"]
     assert captured["schema"] == RubricsVerifierTaskStep(id="j", version=1, criteria=CRITERIA,
                                                          prompt_id="ask")._spec().output_format
+
+
+COMPACTED = Path(__file__).resolve().parents[2] / "data" / "claude_code_atif" / "compacted.json"
+
+
+@pytest.mark.asyncio
+async def test_a_claude_code_run_that_compacts_gets_the_compaction_reading_and_the_context_loss_question(monkeypatch):
+    """No harness labels, but a wake whose Claude Code turn compacted: its judge is told the summary is the assistant's
+    own, as a labelled run's is, and asked about context loss; the lines only a labelled harness writes aren't told."""
+    ctx, sandbox, sources = _staged_run(monkeypatch)
+    del sources[ctx.prompt_responses[0].agent_trajectory_object_url]
+    compacting = json.loads(COMPACTED.read_text())["turns"][1]["native"]
+    sources[ctx.prompt_responses[0].target_agent_per_turn_trajectory_object_urls[1]] = json.dumps(compacting)
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
+    captured = _judging(monkeypatch, verifier, sources, {"score": 0.0, "justification": "Booked without asking.",
+                                                         "context_loss": False, "context_loss_evidence": ""})
+
+    await verifier.execute(ctx)
+
+    entry = ctx.metadata["verifications"]["rubric"]
+    assert entry["context_loss"] == {"failed_criteria": 1, "caused_by_compaction": 0, "ids": []}
+    staged = next(text for path, text in sandbox.files.items() if path.endswith("/wakes/wake_002.jsonl"))
+    [note] = [line for line in map(json.loads, staged.splitlines()) if line.get("compaction")]
+    assert note["event"] == "harness_note" and note["compaction"]["written_by"] == "assistant"
+    for told in ('"harness_note" lines are from the harness that runs the assistant',
+                 'Harness notes have no "at": read them in file order',
+                 "the assistant is responsible for what follows",
+                 'For each criterion you fail, also return "context_loss"'):
+        assert told in captured["prompt"]
+    assert "pre_compaction_save" not in captured["prompt"] and '"internal"' not in captured["prompt"]
+    items = captured["schema"]["schema"]["properties"]["results"]["items"]
+    assert items["properties"]["context_loss"] == {"type": "boolean"}
 
 
 @pytest.mark.asyncio

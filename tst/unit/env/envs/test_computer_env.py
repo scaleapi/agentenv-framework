@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from agentenv_protocol import CONTROL_TOKEN_ENV
+from agentenv_protocol import CONTROL_TOKEN_ENV, CONTROL_TOKEN_SHA256_ENV
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_READY, COMPUTER_RECORDING, TOOL_PREFIX_ENV
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
@@ -31,7 +31,7 @@ from agentenv_protocol.website_browser import BROWSER
 from click.testing import CliRunner
 
 from agent_env.artifact.artifacts import docker_image
-from agent_env.artifact.artifacts.computer import ComputerArtifact
+from agent_env.artifact.artifacts.computer import OS_TYPES, ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
 from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
@@ -51,7 +51,7 @@ from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.store.image_store import registry_api
 from agent_env.store.image_store.registry_api import RegistryRefusedError
 from agent_env.env.envs.computer.utils.probing import _probe
-from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
+from agent_env.env.envs.computer.env import COMPUTER_TOOLS, DEFAULT_DESTINATIONS, ComputerEnv
 from agent_env.env.envs.computer import app_env
 from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.utils.install import Install, MacInstall, Service, WindowsInstall
@@ -1860,7 +1860,8 @@ async def test_a_boot_hands_the_computer_its_token_and_one_never_ready_takes_its
                         environment={"ENVIRONMENT_NAME": "desk"}, token="t0ken", network_policy=None, timeout=60,
                         attribution=None)
 
-    assert create.await_args.kwargs["env"] == {"ENVIRONMENT_NAME": "desk", CONTROL_TOKEN_ENV: "t0ken"}
+    assert create.await_args.kwargs["env"] == {"ENVIRONMENT_NAME": "desk", CONTROL_TOKEN_ENV: "t0ken",
+                                               CONTROL_TOKEN_SHA256_ENV: hashlib.sha256(b"t0ken").hexdigest()}
     assert boot.ready.await_args.args[2] == "t0ken" and boot.ready.await_args.kwargs["sandbox"] is sandbox
     sandbox.terminate.assert_awaited_once()
     assert local_sandbox.LocalSandbox.find_work_dir("local-unready") is None
@@ -2035,6 +2036,10 @@ async def test_a_load_writes_each_file_into_the_computers_downloads_through_its_
     batches = [sorted(marker["path"] for marker in markers) for kind, markers, _ in computer.calls]
     assert sorted(batches) == [["Downloads/a.txt", "Downloads/b.txt"], ["Downloads/sub/big.bin"]]
     assert (computer.home / "Downloads/sub/big.bin").read_bytes() == b"x" * 20
+
+
+def test_every_os_type_has_a_folder_a_load_puts_files_in_by_default():
+    assert set(OS_TYPES) <= set(DEFAULT_DESTINATIONS)
 
 
 @pytest.mark.asyncio
@@ -2615,3 +2620,24 @@ def test_a_required_setting_may_be_left_to_each_deploy_and_one_an_env_gives_sati
     (missing,) = DeployEnvTaskStep(id="d", version=None, env_id=left.id).preflight()
     assert "env_params.app_settings.mail: 'signature' is a required property" in missing
     assert DeployEnvTaskStep(id="d", version=None, env_id=given.id).preflight() == []
+
+
+
+def _driver_card(control_token: str | None) -> dict:
+    params = {"control_token": control_token} if control_token else {}
+    return {"name": "desk", "capabilities": {"extensions": [{"uri": "urn:agentenv:computer/v1", "params": params}]}}
+
+
+@pytest.mark.parametrize("card, held", [
+    (_driver_card("sha256"), {CONTROL_TOKEN_SHA256_ENV}),
+    (_driver_card(None), {CONTROL_TOKEN_ENV}),
+    (None, {CONTROL_TOKEN_ENV, CONTROL_TOKEN_SHA256_ENV})], ids=["takes-a-digest", "older-driver", "on-its-probe"])
+def test_a_computer_whose_driver_takes_a_digest_boots_holding_no_token(card, held):
+    """A driver whose probed card says it takes the token's sha256 boots with only that, so no process in the computer
+    holds a token it could send; an older driver still gets the token."""
+    environment = boot.control_environment("t0ken", card)
+    assert set(environment) == held
+    assert environment.get(CONTROL_TOKEN_SHA256_ENV, hashlib.sha256(b"t0ken").hexdigest()) == \
+        hashlib.sha256(b"t0ken").hexdigest()
+    assert ("t0ken" in environment.values()) is (CONTROL_TOKEN_ENV in held)
+    assert boot.control_environment(None, card) == {}

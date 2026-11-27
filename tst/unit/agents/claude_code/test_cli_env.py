@@ -135,7 +135,7 @@ def test_the_turn_and_thinking_limits_reach_the_cli(spawned, monkeypatch):
         monkeypatch.setenv(name, value)
 
     asyncio.run(claude_bridge.run_claude(prompt="p", session_id="s", resume=False, model="claude-x", max_turns=7,
-                                         max_thinking_tokens=4096))
+                                         max_thinking_tokens=4096, web_tools=True))
 
     assert spawned["cmd"][spawned["cmd"].index("--max-turns") + 1] == "7"
     assert spawned["env"]["MAX_THINKING_TOKENS"] == "4096"
@@ -143,7 +143,7 @@ def test_the_turn_and_thinking_limits_reach_the_cli(spawned, monkeypatch):
 
 
 def test_no_limits_add_no_flags(spawned):
-    asyncio.run(claude_bridge.run_claude(prompt="p", session_id="s", resume=False))
+    asyncio.run(claude_bridge.run_claude(prompt="p", session_id="s", resume=False, web_tools=True))
 
     assert "--max-turns" not in spawned["cmd"] and "MAX_THINKING_TOKENS" not in spawned["env"]
 
@@ -159,7 +159,7 @@ def test_a_404_from_the_endpoint_says_it_may_not_serve_anthropics_messages_api(m
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="s", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="s", resume=False, web_tools=True))
 
     assert result.attempts == 1
     assert result.error == (
@@ -198,6 +198,6 @@ def test_the_workspace_is_the_configured_one_else_the_working_directory_but_neve
 def test_the_cli_runs_in_the_workspace(spawned, monkeypatch, tmp_path):
     monkeypatch.setattr(claude_bridge, "WORKSPACE_DIR", tmp_path / "repo")
 
-    asyncio.run(claude_bridge.run_claude(prompt="p", session_id="s", resume=False))
+    asyncio.run(claude_bridge.run_claude(prompt="p", session_id="s", resume=False, web_tools=True))
 
     assert spawned["cwd"] == tmp_path / "repo" and (tmp_path / "repo").is_dir()

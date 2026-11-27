@@ -10,7 +10,7 @@ import os
 import sys
 import tempfile
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Optional
@@ -34,6 +34,8 @@ from agent_env.task_step.context import TaskStepContext, _strip_redacted_keys
 
 _SPEC_KEYS = ("file_artifact_id", "file_artifact_version", "params")
 _RECORD_TAGS = ("hook", "turn")
+# Where each hook's summary of a step's conversation is kept (Turn.summarize).
+SUMMARIES_KEY = "post_turn_hook_summaries"
 _INVOKABLE = (EXT_CLOCK_URI, EXT_TRIGGERS_URI, EXT_NOTIFICATIONS_URI)
 _TOOL_CALL_TIMEOUT_S = 600
 
@@ -69,7 +71,9 @@ class PostTurnHook:
 
 
 class PostTurnHooks:
-    """The hooks of one step run, each loaded once; ``close`` removes their scripts' temporary files."""
+    """The hooks of one step run, each loaded once when the step starts; ``close`` removes their scripts' temporary
+    files. A hook's script defines ``async def post_turn(turn, params)`` and may define ``def check_params(params)``,
+    called at load, which raises ValueError for params it can't run with."""
 
     def __init__(self) -> None:
         self.hooks: list[PostTurnHook] = []
@@ -105,6 +109,17 @@ class PostTurnHooks:
         if not inspect.iscoroutinefunction(post_turn):
             raise ValueError(f"post-turn hook '{spec['file_artifact_id']}' must define "
                              "`async def post_turn(turn, params)`: steps and runs share one event loop")
+        # A hook may check its params when it loads, before the conversation starts, so a bad one fails the step
+        # before the first message instead of after the agent's first turn.
+        check_params = getattr(module, "check_params", None)
+        if check_params is not None:
+            if not callable(check_params) or inspect.iscoroutinefunction(check_params):
+                raise ValueError(f"post-turn hook '{spec['file_artifact_id']}': check_params must be "
+                                 "`def check_params(params)`")
+            try:
+                check_params(spec.get("params") or {})
+            except ValueError as e:
+                raise ValueError(f"post-turn hook '{spec['file_artifact_id']}' refused its params: {e}") from e
         return PostTurnHook(spec["file_artifact_id"], spec.get("file_artifact_version"), spec.get("params") or {},
                             post_turn)
 
@@ -195,8 +210,12 @@ class Turn:
     """What a hook is handed after an agent turn; ``last`` after the final one, when a returned message is ignored."""
 
     def __init__(self, *, context: TaskStepContext, step_id: str, hook: PostTurnHook, answer: _Answer, number: int,
-                 last: bool, agent_reply: str, agent_parts: list[dict]) -> None:
+                 last: bool, agent_reply: str, agent_parts: list[dict],
+                 trajectory_urls: Sequence[Optional[str]] = ()) -> None:
         self.number = number
+        # The agent's native trajectory of each turn so far, oldest first: None for a turn whose trajectory the
+        # agent returned none of or couldn't be fetched; empty when the agent's card offers no trajectories.
+        self.trajectory_urls: tuple[Optional[str], ...] = tuple(trajectory_urls)
         self.last = last
         self.agent_reply = agent_reply
         self.agent_parts = copy.deepcopy(agent_parts)
@@ -204,6 +223,7 @@ class Turn:
         self.envs = [HookEnv(d, hook.artifact_id) for d in context.deployed_envs]
         self._context = context
         self._step_id = step_id
+        self.step_id = step_id  # the prompt_agent step this turn is in: turn numbers restart in each
         self._hook = hook
         self._answer = answer
 
@@ -211,6 +231,19 @@ class Turn:
     def metadata(self) -> Mapping[str, Any]:
         """A read-only copy of the run's metadata, its secret keys stripped."""
         return MappingProxyType(_strip_redacted_keys(self._context.metadata))
+
+    async def read_trajectory(self, number: int) -> Optional[str]:
+        """Turn ``number``'s trajectory (1 is the first turn) as the agent stored it, as text; None when that turn
+        has none, including every turn of an agent whose card offers no trajectories. Raises IndexError for a turn
+        that hasn't happened."""
+        if not 1 <= number <= self.number:
+            raise IndexError(f"turn {number}: the conversation is at turn {self.number}")
+        url = self.trajectory_urls[number - 1] if number <= len(self.trajectory_urls) else None
+        if url is None:
+            return None
+        from agent_env.config import get_config
+        data = await asyncio.to_thread(lambda: get_config().get_object_store_at(url).get(url))
+        return data.decode("utf-8", errors="replace")
 
     async def ask_user(self, note: Optional[str] = None) -> Answer:
         """Today's user side: agent triggers, then a human or the LLM user sim, which sees only replies sent here.
@@ -235,6 +268,16 @@ class Turn:
             raise ValueError(f"a hook records an object, without the keys {list(_RECORD_TAGS)} it is tagged with")
         (self._context.metadata.setdefault("post_turn_hooks", {}).setdefault(self._step_id, [])
             .append({"hook": self._hook.artifact_id, "turn": self.number, **copy.deepcopy(entry)}))
+
+    def summarize(self, summary: dict) -> None:
+        """Set this hook's summary of the conversation so far, replacing the last one:
+        ``metadata["post_turn_hook_summaries"][step_id][hook]``, one object per hook per step that a verifier or the
+        hub reads without going through the hook's records. Set it every turn to keep it right however the
+        conversation ends; ``{}`` leaves an empty one."""
+        if not isinstance(summary, dict):
+            raise ValueError("a hook's summary is an object")
+        (self._context.metadata.setdefault(SUMMARIES_KEY, {}).setdefault(self._step_id, {})
+            [self._hook.artifact_id]) = copy.deepcopy(summary)
 
     def records(self) -> list[dict]:
         """This hook's own records in this conversation, oldest first: what ``record`` appended for this step, as
@@ -281,12 +324,13 @@ def _parts(message: Any, hook: PostTurnHook) -> list[dict]:
 async def run_post_turn_hooks(hooks: PostTurnHooks, *, context: TaskStepContext, step_id: str, number: int, last: bool,
                               agent_reply: str, agent_parts: list[dict],
                               ask_user: Callable[..., Awaitable[Answer]],
-                              user_triggers: Callable[[], Awaitable[Optional[Answer]]]) -> Optional[Answer]:
+                              user_triggers: Callable[[], Awaitable[Optional[Answer]]],
+                              trajectory_urls: Sequence[Optional[str]] = ()) -> Optional[Answer]:
     """Run the hooks in order; the first to return a message or an end decides, and one that asked returns that."""
     answer = _Answer(ask_user, user_triggers)
     for hook in hooks.hooks:
         turn = Turn(context=context, step_id=step_id, hook=hook, answer=answer, number=number, last=last,
-                    agent_reply=agent_reply, agent_parts=agent_parts)
+                    agent_reply=agent_reply, agent_parts=agent_parts, trajectory_urls=trajectory_urls)
         returned = await hook.post_turn(turn, copy.deepcopy(hook.params))
         if answer.value is not None:
             if returned != answer.value:

@@ -48,7 +48,7 @@ def test_a_cancelled_turn_kills_the_cli_and_the_tools_it_started(monkeypatch, tm
     monkeypatch.setattr(opencode_bridge, "_context_xdg", lambda _context: {})
 
     async def cancel_mid_turn():
-        turn = asyncio.create_task(opencode_bridge.run_opencode(prompt="p", context_id="cancel-test"))
+        turn = asyncio.create_task(opencode_bridge.run_opencode(prompt="p", context_id="cancel-test", web_tools=True))
         deadline = time.monotonic() + 10
         while not (pids.exists() and len(pids.read_text().split()) == 2):
             if turn.done() or time.monotonic() > deadline:
@@ -77,7 +77,7 @@ def test_a_process_that_left_the_clis_tree_does_not_hold_up_the_cancel(monkeypat
     monkeypatch.setattr(opencode_bridge, "_context_xdg", lambda _context: {})
 
     async def cancel_while_it_holds_the_pipes():
-        turn = asyncio.create_task(opencode_bridge.run_opencode(prompt="p", context_id="cancel-test"))
+        turn = asyncio.create_task(opencode_bridge.run_opencode(prompt="p", context_id="cancel-test", web_tools=True))
         while not (pids.exists() and pids.read_text().strip() and escaped.exists() and escaped.read_text().strip()):
             await asyncio.sleep(0.01)
         tool = int(escaped.read_text())
@@ -110,7 +110,7 @@ def test_a_turn_cancelled_while_the_cli_starts_kills_it_once_it_has(monkeypatch,
     monkeypatch.setattr(opencode_bridge, "_context_xdg", lambda _context: {})
 
     async def cancel_while_starting():
-        turn = asyncio.create_task(opencode_bridge.run_opencode(prompt="p", context_id="cancel-test"))
+        turn = asyncio.create_task(opencode_bridge.run_opencode(prompt="p", context_id="cancel-test", web_tools=True))
         await asyncio.wait_for(starting.wait(), 10)
         turn.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -133,7 +133,7 @@ def test_the_agents_shutdown_kills_the_clis_of_running_turns(monkeypatch, tmp_pa
     monkeypatch.setattr(opencode_bridge, "_context_xdg", lambda _context: {})
 
     async def stop_mid_turn():
-        turn = asyncio.create_task(opencode_bridge.run_opencode(prompt="p", context_id="shutdown-test"))
+        turn = asyncio.create_task(opencode_bridge.run_opencode(prompt="p", context_id="shutdown-test", web_tools=True))
         # The shell can write its pids before the spawn returns, while the turn has no CLI of its own yet.
         while not (pids.exists() and len(pids.read_text().split()) == 2 and opencode_bridge._RUNNING):
             await asyncio.sleep(0.01)

@@ -186,10 +186,14 @@ def test_a_driver_is_written_again_only_when_one_of_its_files_changes(bundle_dir
      "install.linux/omarchy: no supports entry names 'omarchy' on linux, so this never applies"),
     (f'{TOML}[[known_failures."linux/omarchy"]]\ncheck = "P6"\nname = "typed text"\nreason = "its plugin"\n', LINUX,
      ("left",), "known_failures.linux/omarchy: no supports entry names 'omarchy' on linux, so this never applies"),
+    (f'{TOML}placement = "provider"\n', LINUX, ("left",),
+     "placement provider, a driver its device's provider serves, isn't supported yet: use inside or beside"),
+    (f'{TOML}placement = "beside"\n', LINUX, ("left",),
+     "placement is 'beside', but the driver's class says 'inside'"),
 ], ids=["no-module", "module-file", "module-class", "button", "no-platform", "unknown-key", "port", "install-os",
         "install-python", "install-files", "install-escape", "no-service", "service-twice", "service-scope",
         "run-missing", "apt-word", "sources-alone", "download-sha", "install-port", "distribution-key",
-        "unsupported-distribution", "unsupported-known-failures"])
+        "unsupported-distribution", "unsupported-known-failures", "placement-provider", "placement-disagrees"])
 def test_a_driver_its_class_cant_be_read_from_is_refused_before_any_write(bundle_dir, toml, supports, buttons,
                                                                           problem):
     _bundle(bundle_dir, toml=toml, supports=supports, buttons=buttons)
@@ -197,6 +201,24 @@ def test_a_driver_its_class_cant_be_read_from_is_refused_before_any_write(bundle
     assert problem in _problems(bundle_dir)
     with pytest.raises(Exception):
         Env.get(f"{ROOT}/desk")
+
+
+def _beside() -> str:
+    return DRIVER.format(supports=ANDROID, buttons=("left",)).replace("    buttons = ",
+                                                                      '    placement = "beside"\n    buttons = ')
+
+
+ANDROID = [{"os": {"type": "android", "display": ["none"]}, "arch": ["amd64"]}]
+
+
+def test_a_driver_beside_its_device_is_written_saying_so_and_its_card_echoes_it(bundle_dir):
+    _bundle(bundle_dir, toml=f'{TOML}placement = "beside"\n', supports=ANDROID, **{"envs/desk/driver.py": _beside()})
+
+    _run(bundle_dir)
+    env = Env.get(f"{ROOT}/desk")
+
+    assert env.placement == "beside" and env.declaration.platforms[0].features["placement"] == "beside"
+    assert ComputerDriverEnv.from_dict(env.to_dict()).placement == "beside"
 
 
 def test_a_driver_takes_an_install_and_known_failures_for_a_distribution_it_supports(bundle_dir):

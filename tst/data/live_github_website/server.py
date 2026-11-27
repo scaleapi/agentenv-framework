@@ -1,5 +1,7 @@
 """A live site for integration tests: github.com, whose pages its server serves none of. Its data plane reads a public
-repository through api.github.com and keeps what a task loads; its session is a test cookie, which GitHub ignores."""
+repository through api.github.com and keeps what a task loads; its session is a test cookie, which GitHub ignores. It's
+ready when github.com answers: the API allows an unauthenticated caller 60 calls an hour, which CI's shared addresses
+spend, so only a read of its state calls it."""
 import json
 import urllib.request
 from typing import Optional
@@ -31,8 +33,9 @@ class GitHub(WebsiteEnvironment):
         return self._repository
 
     @ready_check
-    def api_answers(self) -> bool:
-        return self.repository()["full_name"] == self.settings.repository
+    def site_answers(self) -> bool:
+        with urllib.request.urlopen(urllib.request.Request("https://github.com/", method="HEAD"), timeout=10) as response:
+            return response.status == 200
 
     @session_state
     def account(self, user: Optional[str]) -> dict:

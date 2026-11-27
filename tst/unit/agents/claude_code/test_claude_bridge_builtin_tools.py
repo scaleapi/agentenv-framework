@@ -12,11 +12,11 @@ from agentenv_protocol.a2a_agent import BuiltinTools
 from tst.unit.agents.claude_code.agent import AGENT_DIR, a2a_server, claude_bridge
 
 
-def _command(selection: dict | None) -> list[str]:
+def _command(selection: dict | None, web_tools: bool = True) -> list[str]:
+    config = a2a_server.ClaudeCodeConfig(builtin_tools=selection, web_tools=web_tools)
     return claude_bridge._command(
         "sess-1", False, model=None, allowed_tools=None, mcp_servers=None, system_prompt=None, output_format=None,
-        role=None, effort=None, max_turns=None,
-        builtin_tools=a2a_server.ClaudeCodeConfig(builtin_tools=selection).builtin_tools)
+        role=None, effort=None, max_turns=None, builtin_tools=config.builtin_tools, web_tools=config.web_tools)
 
 
 def test_no_selection_leaves_the_clis_tools_and_mcp_servers_alone():
@@ -37,6 +37,32 @@ def test_a_selection_is_the_clis_tool_flags_with_only_agent_envs_mcp_servers(sel
 
     assert command[at:at + 2] == flags and "--strict-mcp-config" in command
     assert not ({"--tools", "--disallowedTools"} - {flags[0]}) & set(command)
+
+
+def test_web_tools_off_alone_turns_off_the_clis_web_tools_and_leaves_its_mcp_servers_alone():
+    command = _command(None, web_tools=False)
+    at = command.index("--disallowedTools")
+
+    assert command[at + 1] == "WebSearch,WebFetch"
+    assert not {"--tools", "--strict-mcp-config"} & set(command)
+
+
+@pytest.mark.parametrize("selection, disallowed", [
+    ({"disable": ["Bash", "WebFetch"]}, "Bash,WebFetch,WebSearch"),
+    ({"only": ["Read", "WebFetch"]}, "WebSearch,WebFetch"),
+    ({"disable": "*"}, "WebSearch,WebFetch"),
+], ids=["disable-list", "only", "disable-all"])
+def test_web_tools_off_with_a_selection_adds_the_web_tools_to_what_is_turned_off(selection, disallowed):
+    command = _command(selection, web_tools=False)
+
+    assert command[command.index("--disallowedTools") + 1] == disallowed and "--strict-mcp-config" in command
+    assert command.count("--disallowedTools") == 1
+
+
+def test_web_tools_on_leaves_the_clis_web_tools_on():
+    command = _command({"disable": ["Bash"]}, web_tools=True)
+
+    assert command[command.index("--disallowedTools") + 1] == "Bash"
 
 
 def test_a_tool_the_cli_does_not_have_is_refused():

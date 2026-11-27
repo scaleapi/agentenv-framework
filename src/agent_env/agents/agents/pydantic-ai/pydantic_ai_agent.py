@@ -107,6 +107,8 @@ class PydanticAIConfig(AgentConfig):
     system_prompt: str | None = None
     effort: Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None = None
     request_limit: int = 500
+    # Its own tools have no web search or fetch, so false leaves them as they are.
+    web_tools: bool = True
     timeout_seconds: int = 1800
 
 
@@ -630,3 +632,7 @@ def _entry_holding(directory: Path, path: Path) -> str | None:
         return path.resolve().relative_to(directory.resolve()).parts[0]
     except (ValueError, IndexError):
         return None
+
+
+# The pydantic-ai-harness version whose Coder was checked to bundle no web tools, so web_tools False changes nothing.
+NO_WEB_TOOLS_HARNESS_VERSION = "0.61.0"

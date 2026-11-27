@@ -72,8 +72,13 @@ CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
 # The computers that follow the gateway's clock, each as `name=read token`, comma-separated; TOKEN in the name keeps
 # it out of logged compose files.
 CLOCK_FOLLOWERS_ENV = "CLOCK_FOLLOWER_TOKENS"
-# The children the gateway passes its control token on to, comma-separated: a multi env's computers, which boot with it.
+# The children the gateway passes its control token on to, comma-separated: a multi env's computers that an older
+# agent-env booted with it. Delete once no deploy sets it.
 CONTROL_TOKEN_CHILDREN_ENV = "CONTROL_TOKEN_CHILDREN"
+# Each child's own control token, as `name=token`, comma-separated: a multi env's computers, each booted with a token
+# of its own, which the gateway puts in place of its own on that child's /svc routes; TOKEN in the name keeps it out of
+# logged compose files.
+CHILD_CONTROL_TOKENS_ENV = "CHILD_CONTROL_TOKENS"
 # The gateway's computers, comma-separated: a multi env's, each a child on a sandbox of its own, whose input calls set
 # who drives it, the role its browser's requests take.
 COMPUTERS_ENV = "COMPUTERS"
@@ -218,15 +223,26 @@ WILDCARD = "*"
 TOOL_DISABLE_ACTION = "disable"
 TOOL_ENABLE_ACTION = "enable"
 # The harness's routes that take the deploy's control token: the ones that change tool access, triggers and
-# notifications. The gateway also takes it for the data plane and for an MCP server's own endpoint behind its proxy
-# (Gateway._takes_control_token). Every other route stays open for now, the clock's writes included: callers outside
-# agent-env set the clock over plain HTTP and don't send the token yet.
+# notifications. The gateway also takes it, behind its proxy, for the data plane, for an MCP server's own endpoint and
+# for the LEGACY_STATE_ROUTES (Gateway._takes_control_token). Every other route stays open for now, the clock's writes
+# included: callers outside agent-env set the clock over plain HTTP and don't send the token yet.
 CONTROL_ROUTES = frozenset({
     f"/tools/{TOOL_DISABLE_ACTION}", f"/tools/{TOOL_ENABLE_ACTION}",
     "/triggers/register", "/triggers/remove", "/triggers/clear",
     "/notifications/config", "/notifications/take", "/notifications/clear",
     CLOCK_FOLLOWERS_PATH,
 })
+# The older REST routes a backing server serves beside its data plane, which reset, load or export its state.
+# Behind the proxy, /svc/<key>/ takes the control token for each, and anything under it, on a gateway that has one.
+# A site's /website route serves none of them, since a site with no frontend of its own serves its backend there and
+# an older frontend passes them on.
+LEGACY_STATE_ROUTES = (
+    "/api/reset", "/api/add", "/api/bridge/apply",
+    "/export-state", "/export-snapshot", "/snapshot-dirty",
+    "/reset-memory", "/validate-rows",
+    "/api/_state", "/api/_reset", "/api/debug/seed",
+)
+SITE_LEGACY_STATE_ROUTES = frozenset(LEGACY_STATE_ROUTES)
 
 
 class GatewayMode(str, Enum):

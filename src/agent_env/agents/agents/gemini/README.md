@@ -36,7 +36,7 @@ bound. Through a LiteLLM proxy, a provider-prefixed model's chat completions don
 
 | Extension | Implementation |
 |---|---|
-| `agent-config/v1` | `GeminiConfig`: `model`, `system_prompt`, `allowed_tools` (read back, but the CLI has no per-run tool allowlist), `project_id`, `task_id`, `timeout_seconds` (600 by default) |
+| `agent-config/v1` | `GeminiConfig`: `model`, `system_prompt`, `allowed_tools` (read back, but the CLI has no per-run tool allowlist), `project_id`, `task_id`, `timeout_seconds` (600 by default), `web_tools` (`false` adds the CLI's `google_web_search` and `web_fetch` to its settings' `tools.exclude`) |
 | `mcp-config/v1` | SDK default, with names stripped of `_`; written to each run's settings |
 | `skill-config/v1` | inline and bundle skills installed as `~/.gemini/skills/<name>/SKILL.md`, where the CLI finds them |
 | `trajectory/v1` | the task's stream-json events, live while it runs (format `gemini-stream-json/1`) |

@@ -106,7 +106,7 @@ def test_request_and_response_contracts(codex):
     config = methods["urn:agentenv:agent-config/v1"]
     assert config["set"]["request"]["supported"] == [
         "builtin_tools", "description", "effort", "max_turns", "model", "name", "output_format", "project_id",
-        "role", "system_prompt", "task_id", "timeout_seconds",
+        "role", "system_prompt", "task_id", "timeout_seconds", "web_tools",
     ]
     assert set(config["set"]["request"]["schema"]["properties"]) == set(config["set"]["request"]["supported"])
     assert config["get"] == {"method": "GET", "response": {"required": ["config"]}}

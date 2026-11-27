@@ -1,7 +1,8 @@
 """The data plane on a computer: ``data/add`` writes files under the session user's home, ``data/get`` returns the
-files under the paths its caller names, or under ``DEFAULT_DATA_PATHS`` when it names none, leaving out those under a
-path one of the computer's apps keeps its data in. Each file part names its path, relative to the home, under the
-``data-objects/v1`` marker."""
+files under the paths its caller names, or under the driver's ``default_data_paths`` when it names none, leaving out
+those under a path one of the computer's apps keeps its data in. Each file part names its path, relative to the home,
+under the ``data-objects/v1`` marker. A driver beside a device reads its files with ``@read_files``; the recordings
+it keeps are in its own home."""
 from __future__ import annotations
 
 import base64
@@ -27,7 +28,10 @@ if TYPE_CHECKING:
 MAX_URL_BYTES = 1 << 30
 #: What ``data/get`` returns when its caller names no paths: the folders a desktop keeps its user's files in.
 DEFAULT_DATA_PATHS = ("Desktop", "Documents", "Downloads")
-_PATHS = TypeAdapter(list[RelativePath])
+#: Where the base class writes recordings, relative to the driver's home, and keeps them when there is no grant.
+RECORDINGS_DIR = ".agentenv-recordings"
+#: Paths relative to the session user's home: those data/get is given, and a driver's ``default_data_paths``.
+RELATIVE_PATHS = TypeAdapter(tuple[RelativePath, ...])
 
 
 class DataPlane:
@@ -35,6 +39,8 @@ class DataPlane:
 
     _computer: ComputerRuntime
     settings: ComputerSettings
+    default_data_paths: tuple[str, ...]
+    placement: str
 
     @add_data
     async def _computer_data_add(self, parts: list) -> None:
@@ -56,10 +62,20 @@ class DataPlane:
     async def _computer_data_get(self, write_namespace: Optional[WriteNamespaceGrant] = None,
                                  paths: Optional[list[str]] = None) -> list:
         try:
-            named = _PATHS.validate_python(paths) if paths is not None else list(DEFAULT_DATA_PATHS)
+            named = list(RELATIVE_PATHS.validate_python(paths) if paths is not None else self.default_data_paths)
         except ValidationError:
             raise ValueError(f"data/get on a computer takes paths relative to the home, not {paths!r}") from None
-        return await file_parts(Path.home(), named, write_namespace, leaving_out=await self._computer.app_paths())
+        leaving_out = await self._computer.app_paths()
+        if not self._computer.has("read_files"):
+            return await file_parts(Path.home(), named, write_namespace, leaving_out=leaving_out)
+        kept_here = [path for path in named
+                     if self.placement == "beside" and PurePosixPath(path).is_relative_to(RECORDINGS_DIR)]
+        on_device = [path for path in named if path not in kept_here]
+        with tempfile.TemporaryDirectory() as into:
+            if on_device:
+                await self._computer.call("read_files", on_device, Path(into))
+            return await parts_of(listed(Path(into), on_device, leaving_out) + listed(Path.home(), kept_here),
+                                  write_namespace)
 
 
 async def file_parts(home: Path, paths: list[str], write_namespace: Optional[WriteNamespaceGrant],
@@ -67,8 +83,17 @@ async def file_parts(home: Path, paths: list[str], write_namespace: Optional[Wri
     """A part for each file under ``paths`` of ``home`` but under none of ``leaving_out``, naming its path relative to
     ``home``: uploaded under ``write_namespace`` when there is one, else inline. A file a running app removes before it's
     read is left out."""
-    files = [(relative, source) for relative, source in data_files(home, paths)
-             if not any(PurePosixPath(relative).is_relative_to(owned) for owned in leaving_out)]
+    return await parts_of(listed(home, paths, leaving_out), write_namespace)
+
+
+def listed(home: Path, paths: list[str], leaving_out: list[str] = ()) -> list[tuple[str, Path]]:
+    return [(relative, source) for relative, source in data_files(home, paths)
+            if not any(PurePosixPath(relative).is_relative_to(owned) for owned in leaving_out)]
+
+
+async def parts_of(files: list[tuple[str, Path]], write_namespace: Optional[WriteNamespaceGrant]) -> list:
+    """A part for each of ``files``, named by its relative path: all uploaded under one ``write_namespace``, whose
+    limits they share, when there is one, else inline."""
     parts = []
     if write_namespace is not None:
         uploader = NamespaceUploader(write_namespace)

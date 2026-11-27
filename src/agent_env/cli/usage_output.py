@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from agent_env.config.model import ModelRole
 from agent_env.config.model_pricing import ReportedBy
-from agent_env.task.usage.summary import Share, UsageSummary
+from agent_env.task.usage.summary import Bound, Share, UsageSummary
 
 _ROLE_NAMES = {role.value: role.record_key for role in ModelRole}
 # The cost sources that aren't the price map, in the order they're named.
@@ -49,12 +49,10 @@ def _share(share: Share) -> str:
 
 
 def _cost(of: UsageSummary | Share) -> str:
-    """``of``'s cost with what it is: ``at least`` when some usage went unpriced or uncounted, ``at most`` when some
-    was priced on an assumed rate, ``estimated`` when both, and ``unpriced`` when nothing was priced."""
-    if of.cost_usd is None:
+    """``of``'s cost after the word its ``bound`` gives, none when exact; ``unpriced`` when nothing was priced."""
+    if of.bound is Bound.UNPRICED:
         return "unpriced"
-    lower, upper = of.lower_bound, of.upper_bound
-    word = "estimated " if lower and upper else "at least " if lower else "at most " if upper else ""
+    word = "" if of.bound is Bound.EXACT else f"{of.bound.value.replace('_', ' ')} "
     return f"{word}{_dollars(of.cost_usd)}"
 
 

@@ -39,8 +39,23 @@ _CATALOG = {"models": [
 ]}
 
 
-def _overrides(selection: dict | None) -> list[str]:
-    return codex_config.builtin_tools_overrides(a2a_server.CodexConfig(builtin_tools=selection).builtin_tools)
+def _overrides(selection: dict | None, web_tools: bool = True) -> list[str]:
+    config = a2a_server.CodexConfig(builtin_tools=selection, web_tools=web_tools)
+    return codex_config.builtin_tools_overrides(config.builtin_tools, web_tools=config.web_tools)
+
+
+@pytest.mark.parametrize("selection", [None, {"disable": ["view_image"]}, {"only": ["exec_command", "write_stdin", "web_search"]},
+                                       {"disable": ["web_search"]}],
+                         ids=["no-selection", "disable-list", "only-with-web-search", "already-off"])
+def test_web_tools_off_turns_the_clis_web_search_off_once_on_top_of_any_selection(selection):
+    overrides = _overrides(selection, web_tools=False)
+
+    assert overrides.count('web_search="disabled"') == 1
+    assert set(overrides) - {'web_search="disabled"'} == set(_overrides(selection)) - {'web_search="disabled"'}
+
+
+def test_web_tools_on_changes_nothing():
+    assert _overrides({"disable": ["view_image"]}, web_tools=True) == _overrides({"disable": ["view_image"]})
 
 
 def _catalog_overrides(selection: dict | None) -> list[str]:
@@ -206,12 +221,13 @@ def _alive(pid: int) -> bool:
 
 
 def test_a_catalog_read_past_its_time_is_killed_and_fails_the_selection(cli, tmp_path):
-    """The read gets only the time it's given, and its child doesn't outlive it."""
+    """The read gets only the time it's given, and its child doesn't outlive it. The time leaves a loaded machine
+    time to start the stand-in CLI and its child."""
     pid_file = _hanging_cli(tmp_path)
     tools = a2a_server.CodexConfig(builtin_tools={"disable": "*"}).builtin_tools
 
-    with pytest.raises(RuntimeError, match="no catalog within 1s"):
-        asyncio.run(codex_config.catalog_overrides(tools, timeout_s=1))
+    with pytest.raises(RuntimeError, match="no catalog within 3s"):
+        asyncio.run(codex_config.catalog_overrides(tools, timeout_s=3))
     assert not _alive(int(pid_file.read_text()))
 
 

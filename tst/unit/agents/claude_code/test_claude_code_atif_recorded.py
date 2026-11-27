@@ -26,10 +26,15 @@ from agentenv_protocol.atif import RecordedTask, check_adapter, check_media, tas
 
 from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (  # noqa: E402
     compact_atif_trajectory,
+    is_compaction,
     transcript_from_atif,
 )
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import TrajectoryFilter  # noqa: E402
-from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import atif_turn_events, turn_events  # noqa: E402
+from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import (  # noqa: E402
+    TrajectoryFormatError,
+    atif_turn_events,
+    turn_events,
+)
 from tst.unit.agents.claude_code.agent import claude_code_atif  # noqa: E402
 
 FIXTURES = REPO / "tst" / "data" / "claude_code_atif"
@@ -93,15 +98,14 @@ def test_a_recorded_run_replays_to_its_document_under_the_live_rule(scenario):
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_a_recorded_runs_steps_sum_to_the_usage_each_turn_reported(scenario):
-    """The copy's totals are the turns' reported usage. Its token counts leave out a turn that compacts the conversation:
-    the copy has no step for the call that wrote its summary yet, though its cost counts it."""
+    """The copy's totals are the turns' reported usage, a turn that compacts the conversation's included: the step of
+    the call that wrote its summary carries what the turn reported beyond its other steps."""
     _, usage = recorded(scenario)
     final = replay(scenario).document["final_metrics"]
-    compacted = compacted_turns(scenario)
     reported = [turn or {} for turn in usage]
     for metric, field in (("total_prompt_tokens", "input_tokens"), ("total_completion_tokens", "output_tokens"),
                           ("total_cached_tokens", "cache_read_tokens")):
-        total = sum(turn.get(field) or 0 for index, turn in enumerate(reported) if index not in compacted)
+        total = sum(turn.get(field) or 0 for turn in reported)
         assert final.get(metric, 0) == total, (metric, final.get(metric), total)
     if all(turn.get("cost_usd") is not None for turn in reported):
         assert math.isclose(final["total_cost_usd"], sum(turn["cost_usd"] for turn in reported))
@@ -125,7 +129,9 @@ def test_the_recordings_cover_what_the_adapter_maps():
     assert any(step.get("extra", {}).get("agentenv", {}).get("attempt") == 2 for step in retried)
     assert any("error" in step.get("extra", {}).get("agentenv", {}) for step in documents["api-error"]["steps"])
     assert any(step.get("extra", {}).get("agentenv", {}).get("reasoning") for step in documents["thinking"]["steps"])
-    assert compacted_turns("compacted") == {1}
+    compaction = [step for step in documents["compacted"]["steps"] if "compaction" in step.get("extra", {}).get(
+        "agentenv", {})]
+    assert compacted_turns("compacted") == {1} and len(compaction) == 1 and compaction[0]["metrics"]
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
@@ -144,7 +150,8 @@ def test_a_judge_reads_each_recorded_turn_with_its_calls_results_answer_and_scre
         assert kinds.count("tool_call") == sum(len(step.get("tool_calls") or ()) for step in steps)
         assert kinds.count("tool_result") == len(results)
         assert ("final_response" in kinds) == any(isinstance(step.get("message"), str) and step["message"].strip()
-                                                 for step in view["steps"] if step["source"] == "agent")
+                                                 for step in view["steps"]
+                                                 if step["source"] == "agent" and not is_compaction(step))
         transcript, frames = transcript_from_atif(view, lambda path: check_media(path, kit.media[path]) or kit.media[path])
         assert len(transcript.actions) == kinds.count("tool_call")
         assert len(frames) == len(images)
@@ -157,27 +164,48 @@ def test_a_judge_reads_each_recorded_turn_with_its_calls_results_answer_and_scre
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_a_recorded_turns_copy_gives_a_judge_the_events_its_native_trajectory_does(scenario):
     """always_on's judge stages each wake from its events. A copy gives the native turn's, but for a sub-agent's prompt,
-    which only native stdout carries (as a note), and its closing text, which only its transcript, so the copy, has; and
-    for a turn that compacts the conversation, whose summary and "Compacted" only native stdout carries (as notes) until
-    the copy has a compaction step."""
+    which only native stdout carries (as a note), and its closing text, which only its transcript, so the copy, has. A
+    turn that compacts the conversation gives its summary as a compaction note with its facts, and the CLI's
+    "Compacted" as a note, from both."""
     data = json.loads((FIXTURES / f"{scenario}.json").read_text())
     document = replay(scenario).document
-    compacted = compacted_turns(scenario)
-    for index, turn in enumerate(data["turns"]):
+    for turn in data["turns"]:
         native = turn_events(json.dumps(turn["native"])).events
         copied = atif_turn_events(task_document(document, [turn["turn"]["task_id"]])).events
-        if index in compacted:
-            notes = [e["text"] for e in native if e["type"] == "note"]
-            assert len(notes) == 2 and notes[0].startswith("This session is being continued") and "Compacted" in notes[1]
-            assert [e for e in native if e["type"] != "note"] == [{"type": "final", "text": "", "error": False}]
-            assert copied == [{"type": "final", "text": None, "error": False}]
-            continue
         if scenario == "subagent":
             assert [e["type"] for e in native if e.get("subagent")] == ["note", "tool_call"]
             assert [e["type"] for e in copied if e.get("subagent")] == ["tool_call", "text"]
             native = [e for e in native if not (e["type"] == "note" and e.get("subagent"))]
             copied = [e for e in copied if not (e["type"] == "text" and e.get("subagent"))]
         assert copied == native
+
+
+@pytest.mark.parametrize(("scenario", "turn", "facts", "said"), [
+    ("compacted", 1, {"written_by": "assistant", "trigger": "manual", "tokens_before": 28634, "tokens_after": 2839},
+     "it was set off on request, such as by a command (manual); the history went from 28,634 tokens to 2,839"),
+    ("autocompacted", 0, {"written_by": "assistant", "trigger": "auto", "tokens_before": 58741, "tokens_after": 32484},
+     "the harness set it off on its own (auto); the history went from 58,741 tokens to 32,484")])
+def test_a_recorded_compaction_reaches_a_judge_as_one_note_with_its_facts_natively_and_from_its_copy(scenario, turn,
+                                                                                                     facts, said):
+    """/compact between turns, and an auto-compaction partway through one as the history filled."""
+    recorded = json.loads((FIXTURES / f"{scenario}.json").read_text())["turns"][turn]
+    native = turn_events(json.dumps(recorded["native"])).events
+    copied = atif_turn_events(task_document(replay(scenario).document, [recorded["turn"]["task_id"]])).events
+    [compaction] = [event for event in native if event.get("compaction")]
+    assert compaction["compaction"] == facts
+    assert compaction["text"].startswith(
+        "Compaction summary (written by the assistant's own model, in a summary turn the harness asked for; it replaces "
+        f"the older history the assistant sees; {said}):\nThis session is being continued from a previous conversation")
+    assert [event for event in copied if event.get("compaction")] == [compaction]
+
+
+def test_a_copys_compaction_that_doesnt_say_who_wrote_its_summary_is_refused_as_native_is():
+    data = json.loads((FIXTURES / "compacted.json").read_text())
+    document = replay("compacted").document
+    step = next(step for step in document["steps"] if is_compaction(step))
+    del step["extra"]["agentenv"]["compaction"]["written_by"]
+    with pytest.raises(TrajectoryFormatError, match="who wrote the compaction summary isn't known"):
+        atif_turn_events(task_document(document, [data["turns"][1]["turn"]["task_id"]]))
 
 
 def test_from_atif_reads_harbors_own_conversion_of_a_recorded_session():

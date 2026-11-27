@@ -42,7 +42,7 @@ async def test_a_turn_runs_in_its_contexts_profile_with_the_endpoint_and_servers
     result = await hermes_bridge.run_hermes(
         prompt="what is 6*7?", context_id="ctx-a", model="provider/model", mcp_servers=_MCP, system_prompt="be brief",
         project_id="p-1", task_id="t-1", role="solver", effort="high", skills_dir=tmp_path / "skills",
-        event_callback=events.append, workspace=str(folders))
+        event_callback=events.append, workspace=str(folders), web_tools=True)
 
     home = hermes_bridge.profile_dir("ctx-a")
     ran = json.loads(fake_hermes.read_text())
@@ -79,18 +79,19 @@ async def test_a_turn_runs_in_its_contexts_profile_with_the_endpoint_and_servers
 @pytest.mark.asyncio
 async def test_a_later_turn_resumes_its_session_and_a_turn_without_a_system_prompt_gets_hermes_own_back(
         fake_hermes, folders):
-    await hermes_bridge.run_hermes(prompt="one", context_id="ctx-b", system_prompt="be brief", workspace=str(folders))
+    await hermes_bridge.run_hermes(prompt="one", context_id="ctx-b", system_prompt="be brief", workspace=str(folders),
+                                   web_tools=True)
     home = hermes_bridge.profile_dir("ctx-b")
 
     result = await hermes_bridge.run_hermes(prompt="two", context_id="ctx-b", session_id="s-earlier",
-                                            workspace=str(folders))
+                                            workspace=str(folders), web_tools=True)
 
     ran = json.loads(fake_hermes.read_text())
     assert ran["args"][ran["args"].index("--resume") + 1] == "s-earlier"
     assert result.session_id == "s-earlier"
     assert not (home / "SOUL.md").exists()
     (home / "SOUL.md").write_text("Hermes' own")
-    await hermes_bridge.run_hermes(prompt="three", context_id="ctx-b", workspace=str(folders))
+    await hermes_bridge.run_hermes(prompt="three", context_id="ctx-b", workspace=str(folders), web_tools=True)
     assert (home / "SOUL.md").read_text() == "Hermes' own"
 
 
@@ -98,7 +99,7 @@ async def test_a_later_turn_resumes_its_session_and_a_turn_without_a_system_prom
 async def test_a_failed_model_call_fails_the_turn_with_what_the_provider_said(monkeypatch, fake_hermes, folders):
     monkeypatch.setenv("FAKE_HERMES_MODE", "fail")
 
-    result = await hermes_bridge.run_hermes(prompt="go", context_id="ctx-c", workspace=str(folders))
+    result = await hermes_bridge.run_hermes(prompt="go", context_id="ctx-c", workspace=str(folders), web_tools=True)
 
     assert (result.error, result.error_code) == ("HTTP 401: invalid key", "401")
     assert result.session_id == "20260101_000000_abcdef"
@@ -112,7 +113,7 @@ async def test_a_turn_that_times_out_or_is_cancelled_kills_hermes_and_the_tools_
     pids, events = tmp_path / "pids", []
     turn = asyncio.create_task(hermes_bridge.run_hermes(
         prompt="go", context_id="ctx-d", timeout_s=3 if ending == "timeout" else 600, event_callback=events.append,
-        workspace=str(folders)))
+        workspace=str(folders), web_tools=True))
     async with asyncio.timeout(10):
         while not (pids.exists() and len(pids.read_text().split()) == 2):
             await asyncio.sleep(0.02)
@@ -140,7 +141,7 @@ async def test_an_output_format_is_asked_for_and_checked(monkeypatch, fake_herme
     schema = {"type": "object", "properties": {"answer": {"type": "integer"}}, "required": ["answer"]}
 
     result = await hermes_bridge.run_hermes(prompt="go", context_id="ctx-e", workspace=str(folders),
-                                            output_format={"type": "json_schema", "schema": schema})
+                                            output_format={"type": "json_schema", "schema": schema}, web_tools=True)
 
     assert "Return only a JSON object matching this schema" in json.loads(fake_hermes.read_text())["prompt"]
     if valid:
@@ -151,5 +152,5 @@ async def test_an_output_format_is_asked_for_and_checked(monkeypatch, fake_herme
 
 def test_the_event_pipe_is_not_left_open_in_the_server(fake_hermes, folders):
     before = len(os.listdir("/dev/fd"))
-    asyncio.run(hermes_bridge.run_hermes(prompt="go", context_id="ctx-f", workspace=str(folders)))
+    asyncio.run(hermes_bridge.run_hermes(prompt="go", context_id="ctx-f", workspace=str(folders), web_tools=True))
     assert len(os.listdir("/dev/fd")) == before

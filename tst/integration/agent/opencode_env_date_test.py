@@ -112,7 +112,7 @@ def test_a_turn_on_an_armed_clock_tells_the_model_the_env_date_and_no_other(open
     with fake_openai.FakeOpenAI(respond=respond) as endpoint:
         monkeypatch.setenv("LITELLM_BASE_URL", endpoint.url)
         result = asyncio.run(opencode_bridge.run_opencode("Say done.", "ctx", model="m", timeout_s=300,
-                                                          workspace=str(tmp_path / "work")))
+                                                          workspace=str(tmp_path / "work"), web_tools=True))
 
     assert not result.error, result.error
     sent = [seen.body for seen in endpoint.completions()]

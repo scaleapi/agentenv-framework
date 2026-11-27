@@ -142,6 +142,8 @@ class LettaCodeConfig(AgentConfig):
     output_format: dict[str, Any] | None = None
     project_id: str | None = None
     task_id: str | None = None
+    # Its own tools have no web search or fetch, so false leaves them as they are.
+    web_tools: bool = True
     timeout_seconds: int = Field(default=1800, gt=0)
 
     @field_validator("output_format")

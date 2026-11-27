@@ -35,7 +35,7 @@ the model no one is there to answer.
 
 | Extension | Implementation |
 |---|---|
-| `agent-config/v1` | `HermesConfig`: `model`, `effort` (Hermes' `--reasoning`), `system_prompt`, `output_format` (a JSON schema the answer is checked against), `project_id`, `task_id`, `timeout_seconds` (1800 by default) |
+| `agent-config/v1` | `HermesConfig`: `model`, `effort` (Hermes' `--reasoning`), `system_prompt`, `output_format` (a JSON schema the answer is checked against), `project_id`, `task_id`, `timeout_seconds` (1800 by default), `web_tools` (`false` turns off Hermes' `web`, `search`, `browser` and `x_search` toolsets with `agent.disabled_toolsets`) |
 | `mcp-config/v1` | SDK default; each server written to the turn's profile config |
 | `skill-config/v1` | inline and bundle skills installed under `$HERMES_ROOT/agentenv-skills/<name>/`, which every profile reads as `skills.external_dirs` |
 | `trajectory/v1` | the turn's Hermes plugin hook events (`on_session_start`, `pre_tool_call`, `post_tool_call`, `post_api_request` with each model response, its tool calls and usage, `api_request_error`, `post_llm_call`, `on_session_end`), live while it runs (format `hermes-hook-events/1`) |

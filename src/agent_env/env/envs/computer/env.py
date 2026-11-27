@@ -56,8 +56,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Where load_artifact puts files in a computer by default: one of the folders data/get returns by default.
-DEFAULT_DESTINATION = "Downloads"
+#: Where load_artifact puts files in a computer by default, by OS type: one of the folders data/get returns by default
+#: there, which Android's shared storage names ``Download``.
+DEFAULT_DESTINATIONS = {"linux": "Downloads", "macos": "Downloads", "windows": "Downloads", "android": "Download"}
 #: The computer app env's type: an app composed into a computer env, and a computer env of its own.
 APP_TYPE = "computer_app"
 #: The statuses of a build a deploy boots, by form: a disk may also boot unprobed, as KVM is where a disk is probed, and
@@ -301,19 +302,16 @@ class ComputerEnv(Env):
                      memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None,
                      env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None,
                      env_params: Optional[dict] = None, tool_prefix: str = "", reach: str = "",
-                     sites_later: bool = False, live_hosts: tuple[str, ...] = (),
-                     control_token: Optional[str] = None) -> DeployedEnv:
+                     sites_later: bool = False, live_hosts: tuple[str, ...] = ()) -> DeployedEnv:
         """With ``tool_prefix``, its driver serves its tools under it, with ``reach``, a network that restricts its
         egress allows that URL's host too, and the ``live_hosts`` of the run's live websites, with ``sites_later``
-        it routes the sites ``env_params.site_routing`` reaches when ``route_sites`` gives them, and with
-        ``control_token`` its framework-only routes take that token, not one of its own: what a multi env gives each
-        of its computers."""
+        it routes the sites ``env_params.site_routing`` reaches when ``route_sites`` gives them."""
         return await deploy_through_provider(
             self, environment_name=self.environment_name, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
             then=self._give_tools, disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
             env_params=env_params, tool_prefix=tool_prefix, reach=reach, sites_later=sites_later,
-            live_hosts=tuple(live_hosts), control_token=control_token)
+            live_hosts=tuple(live_hosts))
 
     async def route_sites(self, sites: list[dict]) -> None:
         """Route ``sites`` on this computer, deployed with ``sites_later``, launch its held apps and finish its boot;
@@ -393,12 +391,12 @@ class ComputerEnv(Env):
     async def load_file_artifact_universe(self, file_artifact_universe: Any,
                                           destination_path: Optional[str] = None) -> LoadFileArtifactUniverseResult:
         """Write each file of ``file_artifact_universe`` under ``destination_path``, a folder relative to the session
-        user's home (``Downloads`` by default), through the driver's ``data/add``, as that user; the result's paths are
-        relative to the home too, since the home's path differs by OS."""
+        user's home (``Downloads`` by default, on Android ``Download``), through the driver's ``data/add``, as that
+        user; the result's paths are relative to the home too, since the home's path differs by OS."""
         if destination_path is not None and posixpath.isabs(destination_path):
             raise ValueError(f"{self.id}: a computer's destination_path is relative to its session user's home, not "
                              f"{destination_path!r}")
-        destination = posixpath.normpath(destination_path or DEFAULT_DESTINATION)
+        destination = posixpath.normpath(destination_path or DEFAULT_DESTINATIONS[self.computer.os.type])
         validate_relative_filename(destination)
         files = file_artifact_universe.get_file_artifacts()
         for filename in files:

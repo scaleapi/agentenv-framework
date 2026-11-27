@@ -2,8 +2,10 @@
 records a role the agent did not get. Its selection of the agent's own tools goes the same way: refused before any
 request by an agent whose agent-config doesn't take it or names no such tool."""
 
+import ast
 import json
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -276,6 +278,132 @@ def test_peer_tools_is_a_bool_and_round_trips():
                                           "version": 1}).peer_tools is None
 
 
+WEB_CONFIG = _agent_config(["name", "description", "web_tools"])
+TOOLS_AND_WEB_CONFIG = _agent_config(["name", "description", "builtin_tools", "web_tools"])
+TOOLS_AND_WEB_CONFIG["params"]["methods"]["set"]["request"]["schema"] = _ToolConfig.model_json_schema()
+ALLOWLIST = {"mode": "allowlist", "allow_hosts": ["models.example"]}
+
+
+@pytest.mark.asyncio
+async def test_web_tools_off_is_sent_once_with_its_identity_and_kept_on_the_card(wiring):
+    context = await wiring.deploy(_card(HEADERS_MCP, WEB_CONFIG), role=None, web_tools=False)
+
+    assert wiring.bodies("/ext/agent-config") == [{"name": "solver", "web_tools": False}]
+    assert context.deployed_agents[0].a2a_card["web_tools"] is False
+    assert A2AAgent.tool_settings(context.deployed_agents[0].a2a_card) == {"web_tools": False}
+
+
+@pytest.mark.asyncio
+async def test_web_tools_left_unset_sends_none(wiring):
+    await wiring.deploy(_card(HEADERS_MCP, WEB_CONFIG), role=None)
+
+    assert wiring.bodies("/ext/agent-config") == [{"name": "solver"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("card", [_card(HEADERS_MCP, ROLE_CONFIG), _card(HEADERS_MCP)],
+                         ids=["config-without-it", "no-agent-config"])
+async def test_web_tools_off_on_an_agent_that_cannot_take_it_fails_before_any_request(wiring, card):
+    with pytest.raises(RuntimeError, match="cannot have its web tools turned off"):
+        await wiring.deploy(card, role=None, web_tools=False)
+
+    assert wiring.requests == []
+    assert wiring.agent.close.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_web_tools_on_for_an_agent_that_cant_take_it_is_dropped_and_the_deploy_goes_on(wiring):
+    context = await wiring.deploy(_card(HEADERS_MCP, ROLE_CONFIG), role=None, web_tools=True)
+
+    assert wiring.bodies("/ext/agent-config") == [{"name": "solver"}]
+    assert "web_tools" not in context.deployed_agents[0].a2a_card
+
+
+@pytest.mark.asyncio
+async def test_a_network_policy_that_restricts_egress_turns_web_tools_off_when_the_step_leaves_them_unset(wiring):
+    await wiring.deploy(_card(HEADERS_MCP, WEB_CONFIG), role=None, network_policy=ALLOWLIST)
+
+    assert wiring.bodies("/ext/agent-config") == [{"name": "solver", "web_tools": False}]
+
+
+@pytest.mark.asyncio
+async def test_a_network_policy_that_restricts_egress_keeps_web_tools_the_step_turns_on(wiring):
+    await wiring.deploy(_card(HEADERS_MCP, WEB_CONFIG), role=None, network_policy=ALLOWLIST, web_tools=True)
+
+    assert wiring.bodies("/ext/agent-config") == [{"name": "solver", "web_tools": True}]
+
+
+@pytest.mark.asyncio
+async def test_a_network_policy_that_restricts_egress_deploys_an_agent_that_cant_turn_web_tools_off_with_a_warning(
+        wiring, caplog):
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        await wiring.deploy(_card(HEADERS_MCP, ROLE_CONFIG), role=None, network_policy=ALLOWLIST)
+
+    assert wiring.bodies("/ext/agent-config") == [{"name": "solver"}]
+    assert any("keeps its own web tools" in m for m in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_an_open_network_policy_leaves_web_tools_alone(wiring):
+    await wiring.deploy(_card(HEADERS_MCP, WEB_CONFIG), role=None, network_policy={"mode": "allow_all"})
+
+    assert wiring.bodies("/ext/agent-config") == [{"name": "solver"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step_policy, run_policy, sent", [
+    (None, ALLOWLIST, {"name": "solver", "web_tools": False}),
+    (ALLOWLIST, {"mode": "allow_all"}, {"name": "solver"}),
+], ids=["run-restricts", "run-opens"])
+async def test_the_runs_network_policy_override_decides_the_web_tools_default(wiring, step_policy, run_policy, sent):
+    wiring.context.metadata["user_overrides"] = {"network_policy": run_policy}
+    await wiring.deploy(_card(HEADERS_MCP, WEB_CONFIG), role=None, network_policy=step_policy)
+
+    assert wiring.bodies("/ext/agent-config") == [sent]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selection, sent", [
+    ({"disable": ["WebFetch", "WebSearch"]}, {"name": "solver", "web_tools": False}),
+    ({"disable": ["Bash", "webfetch", "websearch"]},
+     {"name": "solver", "builtin_tools": {"disable": ["Bash"]}, "web_tools": False}),
+], ids=["only-web-tools", "with-a-tool-it-names"])
+async def test_another_agents_web_tools_in_a_selection_turn_this_agents_web_tools_off(wiring, caplog, selection, sent):
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        await wiring.deploy(_card(HEADERS_MCP, TOOLS_AND_WEB_CONFIG), role=None, builtin_tools=selection)
+
+    assert wiring.bodies("/ext/agent-config") == [sent]
+    assert any("turning its own web tools off with web_tools instead" in m for m in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_another_agents_web_tools_turn_web_tools_off_on_an_agent_without_builtin_tools(wiring):
+    await wiring.deploy(_card(HEADERS_MCP, WEB_CONFIG), role=None, builtin_tools={"disable": ["WebFetch", "WebSearch"]})
+
+    assert wiring.bodies("/ext/agent-config") == [{"name": "solver", "web_tools": False}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("card, selection, refusal", [
+    (_card(HEADERS_MCP, TOOLS_AND_WEB_CONFIG), {"disable": ["Glob", "WebFetch"]}, "'Glob' is not one of"),
+    (_card(HEADERS_MCP, TOOLS_CONFIG), {"disable": ["WebFetch", "WebSearch"]}, "cannot have its web tools turned off"),
+], ids=["a-name-that-is-no-web-tool", "an-agent-that-cant-take-web-tools"])
+async def test_a_selection_the_web_tools_route_cant_carry_fails_before_any_request(wiring, card, selection, refusal):
+    with pytest.raises(RuntimeError, match=refusal):
+        await wiring.deploy(card, role=None, builtin_tools=selection)
+
+    assert wiring.requests == []
+
+
+def test_web_tools_is_a_bool_and_round_trips():
+    with pytest.raises(ValueError):
+        DeployAgentTaskStep(id="ag", version=None, web_tools="no")
+    step = DeployAgentTaskStep(id="ag", version=None, web_tools=False)
+    assert DeployAgentTaskStep.from_dict({**step.to_dict(), "version": 1}).web_tools is False
+    assert DeployAgentTaskStep.from_dict({**DeployAgentTaskStep(id="ag", version=None).to_dict(),
+                                          "version": 1}).web_tools is None
+
+
 def test_a_selection_takes_exactly_one_of_disable_and_only():
     for selection in ({}, {"disable": "*", "only": ["Read"]}, {"enable": ["Read"]}):
         with pytest.raises(ValueError):
@@ -335,3 +463,14 @@ def _gateway_env() -> DeployedGatewayEnv:
         env_id="crm", env_version=1, gateway_url="https://gw.example", mcp_url=_GATEWAY_MCP_URL, sandbox_id="sb-1", environment_card_url="https://gw.example/.well-known/agent-env.json",
         environment_card={"name": "crm"},
     )
+
+
+def test_the_rewrite_takes_exactly_the_web_tools_the_agents_name_as_their_own():
+    names: set[str] = set()
+    for path in (Path(deploy_agent.__file__).parents[2] / "agents" / "agents").glob("*/*.py"):
+        for node in ast.parse(path.read_text()).body:
+            if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "_WEB_TOOLS" for t in node.targets):
+                value = node.value.args[0] if isinstance(node.value, ast.Call) else node.value
+                names |= set(ast.literal_eval(value))
+
+    assert names == deploy_agent._OTHER_AGENTS_WEB_TOOLS

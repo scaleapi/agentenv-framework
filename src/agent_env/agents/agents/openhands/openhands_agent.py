@@ -104,6 +104,8 @@ class OpenHandsConfig(AgentConfig):
     append_system_prompt: str | None = None
     effort: Literal["none", "low", "medium", "high", "xhigh"] | None = None
     max_iterations: int = 500
+    # Its own tools have no web search or fetch, so false leaves them as they are.
+    web_tools: bool = True
     timeout_seconds: int = 1800
 
 

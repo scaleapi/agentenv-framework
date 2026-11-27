@@ -6,7 +6,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from . import clock
-from .dataplane import DEFAULT_DATA_PATHS
 from .recording import recording_params
 from ..types import METHOD_ADD, EnvironmentExtension, EnvironmentTool, IntakeDeclaration, IntakeFormat, intake_extension
 
@@ -23,6 +22,8 @@ COMPUTER_PAGE = "urn:agentenv:computer-page/v1"
 COMPUTER_EXEC = "urn:agentenv:computer-exec/v1"
 COMPUTER_RECORDING = "urn:agentenv:computer-recording/v1"
 
+#: What computer/v1's ``control_token`` says of a driver that takes its control token's sha256.
+CONTROL_TOKEN_SHA256 = "sha256"
 MAX_EXEC_TIMEOUT_S = 3600
 KEYBOARD_RANGES = {"tap_hold_ms": (0, 1000), "type_delay_ms": (0, 1000), "max_hold_ms": (0, 600_000)}
 
@@ -86,15 +87,17 @@ def extension_params(driver: ComputerDriverEnvironment, uri: str) -> dict:
 
 
 def computer_features(driver: ComputerDriverEnvironment) -> dict:
-    """computer/v1's params: what the seven tools take, how input is delivered, the platform and the default data
-    paths."""
+    """computer/v1's params: what the seven tools take, how input is delivered, the platform, the default data paths,
+    where the driver runs, and that the driver takes its control token's sha256 (``CONTROL_TOKEN_SHA256_ENV``), so
+    agent-env boots it with that and not the token."""
     return {
         "buttons": list(driver.buttons), "max_click_count": driver.max_click_count,
         "keys": driver.keys if driver.keys == "all" else list(driver.keys), "max_text_length": driver.max_text_length,
         "max_wait_ms": driver.max_wait_ms, "max_drag_points": driver.max_drag_points,
         "max_duration_ms": driver.max_duration_ms, "max_key_repeat": driver.max_key_repeat,
         "max_scroll_amount": driver.max_scroll_amount, "delivery": "foreground", "platform": driver.platform.as_dict(),
-        "supports": list(driver.supports), "default_data_paths": list(DEFAULT_DATA_PATHS), "screen": driver.screen_kind,
+        "supports": list(driver.supports), "default_data_paths": list(driver.default_data_paths),
+        "screen": driver.screen_kind, "placement": driver.placement, "control_token": CONTROL_TOKEN_SHA256,
     }
 
 

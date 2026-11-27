@@ -74,11 +74,11 @@ def _default_system_settings() -> dict[str, Any]:
 
 @contextmanager
 def run_settings(servers: Mapping[str, Mapping[str, Any]], role: str | None,
-                 system_prompt: str | None) -> Iterator[Path]:
+                 system_prompt: str | None, *, web_tools: bool) -> Iterator[Path]:
     """One run's system settings, in an owner-only file of its own that names `servers` with `role`; with a
     `system_prompt`, also a context file the CLI layers on its own system prompt (the CLI has no flag for one, and
-    replacing its system prompt would lose its tool protocol). The settings go when the run ends, the context file
-    when the last run naming it does."""
+    replacing its system prompt would lose its tool protocol). `web_tools` False leaves the CLI's own web tools out
+    of its tool registry. The settings go when the run ends, the context file when the last run naming it does."""
     home = gemini_home()
     runs = home / "agentenv-runs"
     runs.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -88,6 +88,11 @@ def run_settings(servers: Mapping[str, Mapping[str, Any]], role: str | None,
         **(settings.get("mcpServers") if isinstance(settings.get("mcpServers"), dict) else {}),
         **{settings_name(name): _server_entry(info["url"], info.get("headers"), role) for name, info in servers.items()},
     }
+    if not web_tools:
+        # A tool `tools.exclude` names is left out of the CLI's registry, so the model is never offered it.
+        tools = dict(settings["tools"]) if isinstance(settings.get("tools"), dict) else {}
+        tools["exclude"] = list(dict.fromkeys([*(tools.get("exclude") or []), *_WEB_TOOLS]))
+        settings["tools"] = tools
     context = dict(settings["context"]) if isinstance(settings.get("context"), dict) else {}
     if task_dirs := [d for d in TASK_DIRS if os.path.isdir(d)]:
         context["includeDirectories"] = list(dict.fromkeys([*(context.get("includeDirectories") or []), *task_dirs]))
@@ -121,3 +126,11 @@ def _prompt_file(home: Path, system_prompt: str) -> Iterator[Path]:
             if not _prompt_files[path]:
                 del _prompt_files[path]
                 path.unlink(missing_ok=True)
+
+
+# The CLI's own web tools: what a deploy_agent web_tools False leaves out.
+_WEB_TOOLS = ("google_web_search", "web_fetch")
+
+
+# The CLI version on which `tools.exclude` was checked to leave _WEB_TOOLS out of the CLI's tool registry.
+WEB_TOOLS_CLI_VERSION = "0.38.2"

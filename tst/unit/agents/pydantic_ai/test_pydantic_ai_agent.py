@@ -3,6 +3,7 @@ import base64
 import io
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -733,3 +734,12 @@ def test_a_turns_usage_is_unknown_where_no_usage_came_back() -> None:
     assert ambiguous == Usage(tool_call_count=0, input_tokens=5000, output_tokens=10, total_tokens=5010,
                               cache_read_tokens=4000, cache_write_tokens=0, input_includes_cache=None,
                               provider_details={"requests": 2, "unreported_calls": 1})
+
+
+def test_web_tools_is_a_no_op_checked_on_the_harness_version_requirements_pin():
+    pinned = re.search(r"^pydantic-ai-harness\[[^]]*\]==(\S+)$", (AGENT_DIR / "requirements.txt").read_text(),
+                       re.M).group(1)
+
+    assert pydantic_ai_agent.NO_WEB_TOOLS_HARNESS_VERSION == pinned, (
+        "pydantic-ai-harness moved: check that Coder still bundles no web search or fetch, then move "
+        "NO_WEB_TOOLS_HARNESS_VERSION")

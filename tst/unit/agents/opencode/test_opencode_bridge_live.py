@@ -38,7 +38,8 @@ def cli(monkeypatch):
 def _run(**kwargs):
     reported: list[dict] = []
     result = asyncio.run(
-        opencode_bridge.run_opencode(prompt="go", context_id="ctx", event_callback=reported.append, **kwargs)
+        opencode_bridge.run_opencode(prompt="go", context_id="ctx", event_callback=reported.append,
+                                     **{"web_tools": True, **kwargs})
     )
     return result, reported
 
@@ -69,7 +70,7 @@ def test_events_are_reported_while_the_cli_runs(cli):
     async def turn():
         reported: list[dict] = []
         running = asyncio.create_task(
-            opencode_bridge.run_opencode(prompt="go", context_id="ctx", event_callback=reported.append)
+            opencode_bridge.run_opencode(prompt="go", context_id="ctx", event_callback=reported.append, web_tools=True)
         )
         async with asyncio.timeout(5):
             while not reported:
@@ -126,7 +127,7 @@ def test_a_callback_that_raises_kills_the_cli(cli):
         raise ValueError("rejected")
 
     with pytest.raises(ValueError, match="rejected"):
-        asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", event_callback=refuse))
+        asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", event_callback=refuse, web_tools=True))
 
     assert started[0].killed
 

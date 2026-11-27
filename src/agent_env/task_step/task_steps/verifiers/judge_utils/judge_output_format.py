@@ -1282,13 +1282,17 @@ follows from the reason: a reason that finds no clear failure gives "pass" (or "
 reason to at most 40 words: the evidence and the conclusion, not your working.
 - "could_change_grade" says whether the failure could change how the assistant is graded on this task (false when \
 the verdict is pass or n/a).
+- "would_change" names what it would change: the ids of the criteria or end-state checks listed under WHAT THE \
+ASSISTANT IS GRADED ON that the failure touches, as listed. Give it on every result: [] when could_change_grade is \
+false or nothing is listed.
 - "assistant_asked" is true when the assistant asked for or invited the behaviour you graded (e.g. asked the user \
 to write a message or to give a fact it should look up); false otherwise. Give it on every result, false when \
 nothing was asked; it is recorded only and doesn't change the verdict.
 
 Return only this JSON object, with one result per criterion, each result's keys in this order:
 {"results": [{"id": "the criterion's id", "reason": "at most 40 words", "turns": [turn numbers the reason rests on], \
-"verdict": "pass" | "fail" | "n/a", "could_change_grade": true | false, "assistant_asked": true | false}]}"""
+"verdict": "pass" | "fail" | "n/a", "could_change_grade": true | false, "would_change": [ids it would change], \
+"assistant_asked": true | false}]}"""
 
 _USER_SIM_CRITERIA = """
 
@@ -1325,9 +1329,13 @@ def _user_sim_checks_output_format() -> dict:
                             "turns": {"type": "array", "items": {"type": "integer"}},
                             "verdict": {"type": "string", "enum": list(USER_SIM_VERDICTS)},
                             "could_change_grade": {"type": "boolean"},
+                            # Required here, as strict structured output needs every property; the parser takes a row
+                            # without it as naming nothing, so answers from before it still parse.
+                            "would_change": {"type": "array", "items": {"type": "string"}},
                             "assistant_asked": {"type": "boolean"},
                         },
-                        "required": ["id", "reason", "turns", "verdict", "could_change_grade", "assistant_asked"],
+                        "required": ["id", "reason", "turns", "verdict", "could_change_grade", "would_change",
+                                     "assistant_asked"],
                         "additionalProperties": False,
                     },
                 },
@@ -1407,10 +1415,24 @@ def _never_gates(criterion: dict) -> bool:
         return False
 
 
+def _named_ids(named: list[str]) -> list[str]:
+    """The ids a fail names in ``would_change``, as the criteria list them: the judge is shown each as ``[c3]``, so
+    surrounding brackets and spaces go."""
+    out = []
+    for x in named:
+        x = x.strip()
+        if x.startswith("[") and x.endswith("]"):
+            x = x[1:-1].strip()
+        if x:
+            out.append(x)
+    return out
+
+
 def _user_sim_row(item: dict, criterion: dict) -> tuple[dict | None, list[str]]:
     """One result checked against its criterion: ``(row, [])``, or ``(None, problems)`` naming the row. The row
     lowers the score (score 0.0, result false) only on a fail with could_change_grade, and never at weight 0;
-    ``verdict`` and ``could_change_grade`` keep what the judge said either way. ``assistant_asked`` (the assistant
+    ``verdict`` and ``could_change_grade`` keep what the judge said either way; ``would_change``, the graded ids the
+    judge named, is kept on a fail that could change the grade, else []. ``assistant_asked`` (the assistant
     asked for or invited the behaviour) is required and recorded only: it never changes the score or a gate."""
     rid = item.get("id")
     problems = []
@@ -1423,6 +1445,9 @@ def _user_sim_row(item: dict, criterion: dict) -> tuple[dict | None, list[str]]:
     asked = item.get("assistant_asked")
     if not isinstance(asked, bool):
         problems.append(f"{rid}: assistant_asked must be true or false")
+    named = item.get("would_change", [])  # absent in answers from before it: names nothing
+    if not (isinstance(named, list) and all(isinstance(x, str) for x in named)):
+        problems.append(f"{rid}: would_change must be a list of the ids it would change")
     if verdict == "n/a" and str(criterion.get("na_when") or "").strip().lower() == _USER_SIM_NA_NEVER:
         problems.append(f"{rid} may not be n/a: it always applies, so answer pass or fail")
     if not isinstance(item.get("reason"), str):
@@ -1451,7 +1476,8 @@ def _user_sim_row(item: dict, criterion: dict) -> tuple[dict | None, list[str]]:
     lowers = change and not _never_gates(criterion)
     row = {**criterion, "id": rid, "reason": reason,
            "turns": [t for t in turns if graded is None or t in graded],
-           "verdict": verdict, "could_change_grade": change, "assistant_asked": asked,
+           "verdict": verdict, "could_change_grade": change,
+           "would_change": _named_ids(named) if change else [], "assistant_asked": asked,
            "justification": reason, "score": 0.0 if lowers else 1.0, "result": not lowers}
     outside = [t for t in turns if graded is not None and t not in graded]
     if outside:
@@ -1600,6 +1626,9 @@ class JudgeOutputFormatSpec:
     # Batched rows are checked for bulk verdicts (shared or short justifications) and retried with a correction. A
     # format whose rows may rightly share a short reason turns it off.
     checks_bulk_verdicts: bool = True
+    # Each row is one criterion's score and justification and nothing else, so judge_samples may grade it several
+    # times and keep its median (``judge_samples``); a format with frames, a per-call block or verdicts leaves it off.
+    samplable: bool = False
 
 
 JUDGE_OUTPUT_FORMAT_REGISTRY: dict[JudgeOutputFormat, JudgeOutputFormatSpec] = {
@@ -1612,6 +1641,7 @@ JUDGE_OUTPUT_FORMAT_REGISTRY: dict[JudgeOutputFormat, JudgeOutputFormatSpec] = {
         diagnose_response=diagnose_rubric_binary_response,
         format_correction_prompt=format_judge_correction_prompt,
         batchable=True,
+        samplable=True,
     ),
     JudgeOutputFormat.RUBRIC_PARTIAL: JudgeOutputFormatSpec(
         output_format=_rubric_score_output_format(),
@@ -1622,6 +1652,7 @@ JUDGE_OUTPUT_FORMAT_REGISTRY: dict[JudgeOutputFormat, JudgeOutputFormatSpec] = {
         diagnose_response=diagnose_rubric_partial_response,
         format_correction_prompt=format_partial_judge_correction_prompt,
         batchable=True,
+        samplable=True,
     ),
     JudgeOutputFormat.RUBRIC_EVIDENCE: JudgeOutputFormatSpec(
         output_format=_rubric_evidence_output_format(),

@@ -74,6 +74,8 @@ from .constants import (
     WILDCARD,
     PGWEB_CONSOLE,
     GatewayMode,
+    LEGACY_STATE_ROUTES,
+    SITE_LEGACY_STATE_ROUTES,
     tool_name_clashes_text,
 )
 from .browser_proxy import PING_INTERVAL_S, BrowserRoutes, TokenRedaction
@@ -180,6 +182,7 @@ class Gateway:
         service_db_url: str | None = None,
         control_token: str | None = None,
         control_token_children: Iterable[str] = (),
+        child_control_tokens: Mapping[str, str] | None = None,
         computers: Iterable[str] = (),
         provider_headers: Iterable[str] = (),
         clock_followers: Mapping[str, str] | None = None,
@@ -193,8 +196,11 @@ class Gateway:
         followers of its clock, each with the read token its watch carries. `site_names` are each site's names as its
         env stores them, the names its card declares standing in for a site's that stores none: a site reached at one
         takes it as its ``Host``. ``list_website_urls`` gives each site `listed_by_name` at its first name, as a browser
-        computer opens it, and the others at their ``website_urls``. `control_token_children` are the children its
-        /svc routes pass its control token on to, a multi env's computers, which take it. `computers` are its children
+        computer opens it, and the others at their ``website_urls``. `child_control_tokens` are its children's own
+        control tokens, a multi env's computers', by name: a request to one's /svc routes with the gateway's token goes
+        on with the child's instead, and a child's token goes on only to that child and to the clock watch, where the
+        child sends it as its read token. `control_token_children` are the children its /svc routes pass its own token on
+        to unchanged, the computers an older agent-env booted with it. `computers` are its children
         that are computers, a multi env's: an input call to one's tools makes its caller the role driving it, which the
         requests its browser sends take. `console_urls` are the env's SQL consoles by key, each served at /svc/<key>/
         only with the control token or, on pgweb, a session minted from it, and not at all without one;
@@ -222,6 +228,7 @@ class Gateway:
         self._service_db_url = service_db_url
         self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
         self._control_token_children = frozenset(control_token_children)
+        self._child_bearers = {name: f"Bearer {token}".encode() for name, token in (child_control_tokens or {}).items()}
         self._consoles = dict(console_urls or {}) if control_token else {}
         self._console_session = ConsoleSession(control_token) if PGWEB_CONSOLE in self._consoles else None
         self._console_csp = " ".join(["frame-ancestors 'self'", *console_frame_ancestors]).encode()
@@ -610,13 +617,21 @@ class Gateway:
     # by every tools/call of that session (and the role is the one its initialize request carried, which that task
     # inherited). Process: child sessions and the time-trigger driver, outer to the MCP session manager's lifespan.
 
-    def _keeps_control_token(self, path: str) -> bool:
-        """Whether a request to ``path`` keeps the gateway's control token: its clock watch, where a computer it fronts
-        sends the token as its read token, and its /svc route to one of those computers, which takes the token."""
-        if path == CLOCK_WATCH_PATH:
-            return True
-        child = path.removeprefix("/svc/").split("/", 1)[0] if path.startswith("/svc/") else None
-        return child in self._control_token_children
+    def _passed_authorization(self, path: str, value: bytes) -> bytes | None:
+        """The ``Authorization`` a request to ``path`` that carries ``value`` goes on with, None for none. The gateway's
+        token goes on as a child's own token to that child's /svc routes, as itself to the clock watch, which reads it,
+        and to an older agent-env's computers (``control_token_children``), and nowhere else. A child's token goes on
+        only to that child's /svc routes and to the clock watch, where the child sends it as its read token. Any other
+        value goes on as it came."""
+        child = route[0] if (route := svc_route(path)) else None
+        if self._control_bearer is not None and hmac.compare_digest(value, self._control_bearer):
+            if child in self._child_bearers:
+                return self._child_bearers[child]
+            return value if path == CLOCK_WATCH_PATH or child in self._control_token_children else None
+        owner = next((name for name, bearer in self._child_bearers.items() if hmac.compare_digest(value, bearer)), None)
+        if owner is None:
+            return value
+        return value if path == CLOCK_WATCH_PATH or child == owner else None
 
     def _asgi_app(self):
         """The served app: FastMCP's Starlette app with the request's caller bound around it, the control routes behind
@@ -627,30 +642,30 @@ class Gateway:
             inner.router.routes.append(WebSocketRoute(BROWSER_ROUTE, self._browsers.relay))
 
         async def app(scope, receive, send):
-            if self._control_bearer and scope["type"] in ("http", "websocket"):
+            if (self._control_bearer or self._child_bearers) and scope["type"] in ("http", "websocket"):
                 headers = scope.get("headers", ())
                 pgweb = scope["type"] == "http" and self._console_session is not None and self._is_pgweb(scope)
                 link = self._console_session.opening_link(scope) if pgweb else None
-                bearer = hmac.compare_digest(dict(headers).get(b"authorization", b""), self._control_bearer)
+                bearer = self._control_bearer is not None and hmac.compare_digest(
+                    dict(headers).get(b"authorization", b""), self._control_bearer)
                 session = pgweb and not bearer and self._console_session.admits(scope)
                 if pgweb:
                     send = self._pgweb_send(send, renew=session and self._console_session.renews(scope))
                 if link is not None and self._console_session.opens(link):
                     await self._console_opened(scope)(scope, receive, send)
                     return
-                if scope["type"] == "http" and self._takes_control_token(scope) and not bearer and not session:
+                if self._control_bearer and scope["type"] == "http" and self._takes_control_token(scope) and \
+                        not bearer and not session:
                     reason, error = (("its pgweb link is spent, expired or not this env's",
                                       "this link is not valid for this env") if link is not None
                                      else ("it takes the env's control token", "this route takes the env's control token"))
                     logger.warning("refused %s %s: %s", scope["method"], scope["path"], reason)
                     await self._json_response({"ok": False, "error": error}, 401)(scope, receive, send)
                     return
-                # Only the clock watch reads the token, which the computers the gateway fronts send it, and only they
-                # receive it, through their /svc routes; every other request goes on without it.
-                if not self._keeps_control_token(scope["path"]):
-                    headers = [(name, value) for name, value in headers if not (
-                        name == b"authorization" and hmac.compare_digest(value, self._control_bearer))]
-                scope = {**scope, "headers": without_session_cookie(headers)}
+                passed = [(name, self._passed_authorization(scope["path"], value) if name == b"authorization" else value)
+                          for name, value in headers]
+                scope = {**scope, "headers": without_session_cookie(
+                    [(name, value) for name, value in passed if value is not None])}
             if scope["type"] != "http":
                 await inner(scope, receive, send)
                 return
@@ -694,17 +709,16 @@ class Gateway:
 
     def _takes_control_token(self, scope: dict) -> bool:
         """Whether a request takes the deploy's control token: a control route, the env's data plane, any path of a SQL
-        console behind /svc, or one of ``token_paths`` behind /svc, by the path as routed or by the one the backing
-        server receives (``reaches``), after dot-segment normalisation. A site's /website route never reaches its data
-        plane."""
+        console behind /svc, or one of ``token_paths`` behind /svc (a backing server's data plane, its MCP endpoint and
+        its LEGACY_STATE_ROUTES), by the path as routed or by the one the backing server receives (``reaches``), after
+        dot-segment normalisation. A site's /website route never reaches its data plane."""
         path = scope["path"]
         if path in CONTROL_ROUTES or is_child_mcp_path(path, RPC_PATH):
             return True
-        prefix, _, rest = path.lstrip("/").partition("/")
-        service, _, rest = rest.partition("/")
-        if prefix == "svc" and service in self._consoles:
+        service, rest = svc_route(path) or (None, "")
+        if service in self._consoles:
             return True
-        guarded = self._token_paths.get(service, ()) if prefix == "svc" else ()
+        guarded = self._token_paths.get(service, ())
         raw, base = scope.get("raw_path") or path.encode(), self.rest_proxy_urls.get(service, "")
         return any(reaches(base, raw, path, rest, endpoint) for endpoint in guarded)
 
@@ -975,12 +989,13 @@ class Gateway:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
         A site's data plane and card, and every path its card advertises for agentenv (``site_reserved_paths``), are
         never reached through its route, so an agent browsing the site can't read its data or what grades it; agentenv
-        reaches them through /svc/<name>/."""
+        reaches them through /svc/<name>/. On a gateway with a token, neither is SITE_LEGACY_STATE_ROUTES
+        (``_site_reserved``)."""
         app = request.path_params["service_name"]
         card = await self._site_card(app)
         if card is None:
             return self._json_response({"error": "website card unavailable"}, 503)
-        if reserved_site_request(request, card.reserved):
+        if reserved_site_request(request, self._site_reserved(card), self.website_urls.get(app, "http://site")):
             return self._json_response({"error": "not found"}, 404)
         response = await self._proxy_rest_request(request, url_map=self.website_urls, site_names=self._names(app, card))
         engine = self._trigger_engine
@@ -998,14 +1013,15 @@ class Gateway:
 
     async def _proxy_website_socket(self, websocket: WebSocket) -> None:
         """Relay a WebSocket on a site's route to its server, as its HTTP requests are: its data plane and card, and
-        every path its card advertises for agentenv (``site_reserved_paths``), are refused, and it goes upstream with
-        the role, role key and forwarded address an HTTP request would carry."""
+        every path its card advertises for agentenv (``site_reserved_paths``), are refused, as ``_site_reserved``
+        says, and it goes upstream with the role, role key and forwarded address an HTTP request would carry."""
         service_name = websocket.path_params["service_name"]
         card = await self._site_card(service_name)
         if card is None:
             await refuse_websocket(websocket, self._json_response({"error": "website card unavailable"}, 503))
             return
-        if reserved_site_request(websocket, card.reserved):
+        if reserved_site_request(websocket, self._site_reserved(card),
+                                 self.website_urls.get(service_name, "http://site")):
             await refuse_websocket(websocket, self._json_response({"error": "not found"}, 404))
             return
         base_url = self.website_urls.get(service_name)
@@ -1015,6 +1031,11 @@ class Gateway:
         await relay_websocket(websocket, base_url, role=self._request_role(websocket),
                               open_timeout=self.REST_PROXY_CONNECT_TIMEOUT_S, withheld=self._withheld,
                               site_names=self._names(service_name, card))
+
+    def _site_reserved(self, card: SiteCard) -> frozenset[str]:
+        """The paths a site's route never reaches: those its card advertises for agentenv, and on a gateway with a
+        token SITE_LEGACY_STATE_ROUTES, which an older site's frontend passes on to its backend."""
+        return card.reserved | SITE_LEGACY_STATE_ROUTES if self._control_bearer else card.reserved
 
     async def _fire_website_triggers(self, request: Request, app: str,
                                      status: int) -> tuple[list[asyncio.Task], float | None]:
@@ -1950,13 +1971,23 @@ def mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str, str]
     return endpoints
 
 
+def svc_route(path: str) -> tuple[str, str] | None:
+    """The child a /svc/<child>/<rest> path is routed to and the rest of its path, None for a path outside /svc."""
+    prefix, _, rest = path.lstrip("/").partition("/")
+    if prefix != "svc":
+        return None
+    child, _, rest = rest.partition("/")
+    return child, rest
+
+
 def token_paths(servers: list[InternalMCPServer], website_urls: dict[str, str],
                 rest_proxy_urls: dict[str, str]) -> dict[str, tuple[str, ...]]:
     """The paths under /svc/<key>/ that take the gateway's control token, by key: every backing server's data plane,
-    extensions included, and an MCP server's own endpoint (``mcp_endpoints``), which skips the gateway's trajectory and
-    triggers. A child env registered under its own name, a computer, takes its own token, so none of its paths are here."""
+    extensions included, its LEGACY_STATE_ROUTES, and an MCP server's own endpoint (``mcp_endpoints``), which skips
+    the gateway's trajectory and triggers. A child env registered under its own name, a computer, takes its own token,
+    so none of its paths are here."""
     endpoints = mcp_endpoints(servers, website_urls, rest_proxy_urls)
-    return {key: (RPC_PATH, *((endpoints[key],) if key in endpoints else ()))
+    return {key: (RPC_PATH, *LEGACY_STATE_ROUTES, *((endpoints[key],) if key in endpoints else ()))
             for key, base in rest_proxy_urls.items()
             if key in website_urls or route_environment_name(key, base, servers, website=False) != key
             or not any(server.name == key for server in servers)}
@@ -2023,23 +2054,29 @@ def site_reserved_paths(card: dict, base: str = "") -> frozenset[str]:
     return frozenset(p for p in paths if p != "/")
 
 
-def site_request_path(request: HTTPConnection) -> str | None:
-    """The path a site's server receives for a request on its route: the raw path forwarded, its dot segments removed
-    by httpx and then decoded. It differs from the path as routed here when an encoded slash sits beside a dot segment
-    (``public%2Fx/../api`` reaches ``/api``). None for a request-target the proxy can't build a URL for: ``forward()``
-    refuses it."""
+def site_request_path(request: HTTPConnection, base_url: str = "http://site") -> str | None:
+    """The path a site's server receives for a request on its route, relative to the path of its address
+    ``base_url``: the raw path forwarded, decoded and its dot segments removed, with the address's path taken off. It differs from the path as routed here when an encoded slash sits beside a dot segment
+    (``public%2Fx/../api`` reaches ``/api``), or when dot segments climb out of the address's path and back into it
+    (``../base/api`` under ``/base`` reaches ``/api``). A path that climbs out and stays out is given whole. None for
+    a request-target the proxy can't build a URL for: ``forward()`` refuses it."""
     try:
-        return httpx.URL(upstream_url("http://site", request)).path
+        sent = _normalized(httpx.URL(upstream_url(base_url.rstrip("/"), request)).path)
+        under = _normalized(httpx.URL(base_url).path).rstrip("/")
     except (ValueError, httpx.InvalidURL):
         return None
+    if under and (sent == under or sent.startswith(under + "/")):
+        return sent[len(under):] or "/"
+    return sent
 
 
-def reserved_site_request(request: HTTPConnection, reserved: frozenset[str] = frozenset()) -> bool:
+def reserved_site_request(request: HTTPConnection, reserved: frozenset[str] = frozenset(),
+                          base_url: str = "http://site") -> bool:
     """Whether a request or WebSocket on a site's route reaches its data plane or env card, or one of the paths
-    ``reserved`` names (``site_reserved_paths``): by the path as routed here, or by the one its server receives
-    (``site_request_path``). A request-target the proxy can't build a URL for isn't reserved here: ``forward()``
-    refuses it."""
+    ``reserved`` names (``site_reserved_paths``): by the path as routed here, or by the one its server at
+    ``base_url`` receives (``site_request_path``). A request-target the proxy can't build a URL for isn't reserved
+    here: ``forward()`` refuses it."""
     if reserved_site_path("/" + request.path_params.get("path", ""), reserved):
         return True
-    sent = site_request_path(request)
+    sent = site_request_path(request, base_url)
     return sent is not None and reserved_site_path(sent, reserved)

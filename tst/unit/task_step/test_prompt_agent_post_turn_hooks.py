@@ -153,6 +153,46 @@ async def test_a_hook_that_is_not_an_async_post_turn_fails_the_step_before_the_a
     assert peers.raw == []
 
 
+CHECKS_PARAMS = """
+    def check_params(params):
+        if "role" not in params:
+            raise ValueError("needs role")
+
+    async def post_turn(turn, params):
+        turn.record({"role": params["role"]})
+        return None
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_hook_that_refuses_its_params_fails_the_step_before_the_agent_is_prompted(monkeypatch):
+    peers = EnvPeers(monkeypatch, {AGENT: []})
+
+    with pytest.raises(ValueError, match="post-turn hook 'checks' refused its params: needs role"):
+        await _step(_hook("checks", CHECKS_PARAMS)).execute(_context())
+
+    assert peers.raw == []
+
+
+@pytest.mark.asyncio
+async def test_a_hook_whose_params_pass_its_check_runs(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: [text("done")]})
+    ctx = _context()
+
+    await _step(_hook("checks", CHECKS_PARAMS), turns=1, params={"role": "r"}).execute(ctx)
+
+    assert [r["role"] for r in _recorded(ctx)] == ["r"]
+
+
+@pytest.mark.asyncio
+async def test_a_check_params_that_is_async_fails_the_step(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: []})
+    source = "async def check_params(params):\n    pass\n\nasync def post_turn(turn, params):\n    return None\n"
+
+    with pytest.raises(ValueError, match="check_params must be `def check_params"):
+        await _step(_hook("async-check", source)).execute(_context())
+
+
 @pytest.mark.asyncio
 async def test_a_hook_with_a_dataclass_and_postponed_annotations_loads_and_close_unregisters_it():
     source = """
@@ -191,6 +231,41 @@ async def test_a_hook_message_is_the_agents_next_prompt_and_no_user_side_is_aske
         (1, False, "one"), (2, False, "two"), (3, True, "three")]
     assert {e["hook"] for e in _recorded(ctx)} == {"next"}
     assert _stored(ctx, peers)["messages"][2] == {"role": "user", "parts": text("wake 1")}
+
+
+@pytest.mark.asyncio
+async def test_a_hooks_summary_is_one_object_per_hook_the_latest_kept(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: [text("one"), text("two"), text("three")]})
+    ctx = _context()
+    counts = _hook("counts", """
+        async def post_turn(turn, params):
+            turn.summarize({"turns": turn.number, "last": turn.last})
+            return {"message": "go on"}
+        """)
+    quiet = _hook("quiet", """
+        async def post_turn(turn, params):
+            if turn.number == 1:
+                turn.summarize({})
+            return None
+        """)
+
+    await _step(quiet, counts, turns=3).execute(ctx)  # quiet first: a hook that answers ends the turn's hooks
+
+    assert ctx.metadata["post_turn_hook_summaries"] == {"talk": {"counts": {"turns": 3, "last": True}, "quiet": {}}}
+    assert "post_turn_hooks" not in ctx.metadata  # a summary is not a record
+
+
+@pytest.mark.asyncio
+async def test_a_summary_that_is_not_an_object_fails_the_turn(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: [text("one")]})
+    ctx = _context()
+    hook = _hook("bad", """
+        async def post_turn(turn, params):
+            turn.summarize(["M1"])
+        """)
+
+    with pytest.raises(Exception, match="a hook's summary is an object"):
+        await _step(hook, turns=1).execute(ctx)
 
 
 @pytest.mark.asyncio
@@ -618,6 +693,66 @@ async def test_with_no_armed_env_clock_stored_messages_carry_none(monkeypatch):
     assert all("env_clock" not in m for m in _stored(ctx, peers)["messages"])
 
 
+@pytest.mark.asyncio
+async def test_a_hook_sees_each_turns_trajectory_so_far_and_can_read_it(monkeypatch):
+    from agent_env.a2a_agent import A2AAgent
+    from agent_env.config import get_config
+    from agent_env.task_step.task_steps import prompt_agent as pa
+
+    EnvPeers(monkeypatch, {AGENT: [text("one"), text("two"), text("three")]})
+    ctx = _context()
+    ctx.deployed_agents[0].a2a_card = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_TRAJECTORY, "params": {}}]}}
+    stored = {"task-1": b'[{"turn": 1}]', "task-3": b'[{"turn": 3}]'}  # turn 2's agent returned none
+
+    async def fetch(url, ext, task_id, prefix, name, *, sandbox_type, headers, card=None):
+        if task_id not in stored:
+            return pa.StoredTrajectory()
+        return pa.StoredTrajectory(get_config().get_object_store().put(f"traj/{task_id}.json", stored[task_id]))
+
+    monkeypatch.setattr(pa, "fetch_native_trajectory", fetch)
+    hook = _hook("reads", """
+        async def post_turn(turn, params):
+            urls = turn.trajectory_urls
+            texts = [await turn.read_trajectory(n) for n in range(1, len(urls) + 1)]
+            try:
+                await turn.read_trajectory(len(urls) + 1)
+                ahead = "read"
+            except IndexError:
+                ahead = "refused"
+            turn.record({"count": len(urls), "missing": [n for n, u in enumerate(urls, 1) if u is None],
+                         "texts": texts, "ahead": ahead})
+            return {"message": f"wake {turn.number}"}
+    """)
+
+    await _step(hook, turns=3).execute(ctx)
+
+    assert [(e["count"], e["missing"], e["texts"], e["ahead"]) for e in _recorded(ctx)] == [
+        (1, [], ['[{"turn": 1}]'], "refused"),
+        (2, [2], ['[{"turn": 1}]', None], "refused"),
+        (3, [2], ['[{"turn": 1}]', None, '[{"turn": 3}]'], "refused"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_offers_no_trajectories_hands_a_hook_none(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: [text("one")]})
+    ctx = _context()
+    hook = _hook("none", """
+        async def post_turn(turn, params):
+            try:
+                await turn.read_trajectory(turn.number + 1)
+                ahead = "read"
+            except IndexError:
+                ahead = "refused"
+            turn.record({"urls": list(turn.trajectory_urls), "this_turn": await turn.read_trajectory(turn.number),
+                         "ahead": ahead})
+            return None
+    """)
+
+    await _step(hook, turns=1).execute(ctx)
+
+    # A turn that happened has no trajectory (None), not an error; one that hasn't is still refused.
+    assert [(e["urls"], e["this_turn"], e["ahead"]) for e in _recorded(ctx)] == [([], None, "refused")]
 
 @pytest.mark.asyncio
 async def test_a_note_passed_after_the_user_side_was_asked_raises_instead_of_being_dropped():

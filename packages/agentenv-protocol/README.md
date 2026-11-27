@@ -265,6 +265,11 @@ name)` raises `AmbiguousChildError` for a shared name, and `client.find_child` r
 `client.serves(card, method)` says whether a card serves a data-plane method by its declared
 `operations`, None for a card that declares none.
 
+The client enables TCP keepalive on each `data/add`, `data/get`, and `data/reset` connection, a
+proxy's included, so it can stay open while the environment prepares a reply. Where supported, probes
+start after 30 seconds of inactivity. Each socket uses the keepalive settings its kernel accepts.
+These calls use HTTPX's usual proxy and TLS settings.
+
 Extensions are invoked from what the card advertises. `client.find_extension_method(card, uri,
 method)` returns one advertised method, whose `endpoint` is the method's own or else the
 extension's, and `client.invoke_extension(base_url, card, uri, params, method=...)` calls it with
@@ -646,7 +651,8 @@ class Store(ForwardingSite):
 
 ## Computer drivers
 
-A computer driver is what runs inside a computer an agent uses through screenshots and input. Write
+A computer driver is what runs inside a computer an agent uses through screenshots and input, or
+beside a device it reaches (see Where it runs below). Write
 one as a `ComputerDriverEnvironment` subclass from `agentenv_protocol.computer`, which needs the
 `computer` extra (`pip install 'agentenv-framework-protocol[computer]'`: mcp, uvicorn, Pillow and PyAV).
 The driver marks the methods that capture the screen and send input; the base class serves the
@@ -699,8 +705,9 @@ pixels), at the display's size times its scale. Input operations may return an `
 | `@pointer_move`, `@pointer_down`, `@pointer_up`, `@pointer_position` | all or none | `computer-pointer/v1` and its five tools; click and scroll at the pointer |
 | `@key_down`, `@key_up` | both or none | `computer-keyboard/v1` and its two tools |
 | `@navigate`, `@history`, `@tabs`, `@dialog`, `@upload`, `@page_state` | all or none, for a screen that is a website browser's page | `computer-page/v1` and its five tools; the `page` of every frame |
-| `@run_in_session` | no; a Linux default | `computer-exec/v1` |
-| `@write_files` | no; a Linux default | `data/add` |
+| `@run_in_session` | no; a default on Linux, macOS, Windows and Android | `computer-exec/v1` |
+| `@write_files` | no; a default on Linux, macOS, Windows and Android | `data/add` |
+| `@read_files` | no; a default on Android | what `data/get` reads in place of the driver's own home |
 | `@record` | no | the stream `computer-recording/v1` records from; without it the base class polls `@capture` |
 
 The class is checked when it is defined: a missing required operation, half a group, two methods
@@ -708,12 +715,22 @@ for one operation that some platform could both match, or features that don't ma
 decorators raise `TypeError`. Predicates (`os`, `distribution`, `version`, `arch`, `display`)
 choose a method per platform, read from `/etc/os-release`, the machine and `XDG_SESSION_TYPE` or
 `DISPLAY`: `@capture(display="x11")` and `@capture(display="wayland")` can sit side by side. A
-driver's own `@run_in_session` or `@write_files` replaces the base class's Linux default, which runs
-as the driver's user inside the desktop session. The base class keeps its state in `self._computer`
+driver's own `@run_in_session`, `@write_files` or `@read_files` replaces the base class's default for
+its OS. On Linux, macOS and Windows that default acts as the driver's user inside the desktop
+session. On Android it goes through adb (`AGENTENV_ADB`, else the `adb` on `PATH`, with adb's own
+`ANDROID_SERIAL` and `ADB_SERVER_SOCKET`) as the device's `shell` user under `/sdcard`, and a written
+file is announced to the media scanner. The base class keeps its state in `self._computer`
 and names its own members `_computer_*` and `computer_*`; a driver that redefines one of them, or
 another private member of the base class, is refused when it is defined, so a helper of the
 driver's can't silently replace one. What the optional operations give is served only when the
 driver has them, through the `served_tools`, `served_extensions` and `served_operations` hooks.
+
+**Where it runs.** A driver runs `inside` its computer, as the session user, unless its class says
+`placement = "beside"`. It then runs next to a device it reaches, such as an Android phone over
+adb, and passes `__init__` the device's `Platform`, since what it would detect is its own host's.
+`computer/v1`'s params carry `placement`. `provider`, a driver the device's provider serves, is
+reserved, and a class that names it is refused. agent-env's `computer_driver` env names the placement in its
+`env.toml` too, and a put where the two differ is refused.
 
 **What the base class serves:**
 
@@ -763,9 +780,13 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   user's home, under the `data-objects/v1` marker (`{"path": ...}`), as inline bytes, an https URL,
   or a `transfers.ReadObject` read grant under the marker's `read`, and writes them atomically.
   `data/get` returns the files under the `paths` it's given, relative to the home, or under the
-  card's `default_data_paths` (`Desktop`, `Documents`, `Downloads`) when it's given none, inline or
-  uploaded under a `write_namespace` grant, leaving out the paths its apps keep their data in. An
-  environment whose `@get_data` hook takes no `paths` refuses them.
+  card's `default_data_paths` when it's given none, inline or uploaded under a `write_namespace`
+  grant, leaving out the paths its apps keep their data in. The default paths are `Desktop`,
+  `Documents` and `Downloads`, unless the driver class declares its own
+  (`default_data_paths = ("Download", "DCIM")`): a tuple of normalized relative paths, checked when
+  the class is defined. With `@read_files`, `data/get` reads the files through it. A beside
+  driver's recordings, under `.agentenv-recordings`, still come from its own home. An environment
+  whose `@get_data` hook takes no `paths` refuses them.
 - **The card** (the name from `ENVIRONMENT_NAME`, then `@computer_driver`'s), and per-role tool
   access (`tool_access` is on).
 
@@ -1366,7 +1387,12 @@ the profile's spec, and `fixtures/` holds its canonical examples. The package ne
   with the cache included, stores media at `media/<sha256>.<ext>`, embeds sub-agents and normalizes timestamps. A
   record no method takes is counted in the root profile. `turn.tool_definitions([...], agent=None)` writes the tools
   the model was offered, in OpenAI's function form, to a trajectory's `agent.tool_definitions`; a later call adds
-  tools and replaces those of the same name.
+  tools and replaces those of the same name. A message the harness itself put in the conversation, such as a
+  command's output, is `turn.system_message(text=...)`, a `source: system` step of its own. A compaction, a summary
+  that replaced the conversation in what the agent sees, is the message of the step of the call that wrote it,
+  marked by `turn.compaction(step=..., written_by="assistant" | "harness", trigger="manual" | "auto")`, its usage
+  that call's (profile 1.1), with the conversation's `tokens_before` and `tokens_after` when the harness counts them
+  (1.2).
 - **The runner** (`AdapterRun`, `replay`) feeds one A2A context's records through one adapter instance, a task at a
   time. It writes each task's user step from its `TurnContext`, and the final response once, with the task's
   terminal state on its last step. Its `page()` is the live view, built when it's read: closed steps only, so a
@@ -1914,6 +1940,20 @@ from agentenv_protocol.a2a_agent import AgentConfig, BuiltinTools
 
 class MyAgentConfig(AgentConfig):
     builtin_tools: BuiltinTools[Literal["shell", "read_file", "web_fetch"]] | None = None
+```
+
+An agent whose own tools include web search or fetch also takes `web_tools: bool = True` and maps `false` to turning
+those tools off, whatever they are called; the MCP tools AgentEnv gives it stay. A task sets it on `deploy_agent`
+without knowing which agent runs. `false` for an agent whose config has no `web_tools` is refused before the deploy
+sends it anything. A `network_policy` that restricts egress makes `false` the default for an agent that takes it; an
+agent that doesn't keeps its web tools, with a warning. A `builtin_tools` list to turn off that names another agent's
+web tools, such as Claude Code's `WebSearch` and `WebFetch`, becomes `web_tools: false` on an agent whose schema
+doesn't have them. An agent with no web tools of its own can declare the field and ignore it, so such a task runs
+on it too.
+
+```python
+class MyAgentConfig(AgentConfig):
+    web_tools: bool = True
 ```
 
 `output_format` is author-owned in v1 rather than a field on the base

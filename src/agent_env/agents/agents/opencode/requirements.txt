@@ -5,3 +5,5 @@ agentenv-framework-protocol[agent]>=0.1.643
 jsonschema>=4.18,<5
 # The model relay's server and client (model_relay.py).
 aiohttp>=3.9,<4
+# The CA bundle the relay trusts on an install target that has none of its own (install.sh).
+certifi
