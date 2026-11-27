@@ -163,8 +163,11 @@ Reference: `enable(TRAJECTORY_V1, live=True, ...)`, `ClaudeCodeAgent.run` passin
 `event_callback=request.trajectory.append`, and `get_context_trajectory` / `upload_context_trajectory`. Its adapter,
 `claude_code_atif.py`, builds steps from stream-json with each message's time, usage and tools from the CLI's session
 transcript, which `claude_bridge.SessionTail` feeds as aux records only while `request.trajectory.builds_atif`. Codex's,
-`codex_atif.py`, builds them from the CLI's rollout alone, which `codex_bridge.RolloutTail` feeds; Gemini's,
-`gemini_atif.py`, from its session transcript (`gemini_bridge.SessionTail`) and the proxy's call records. A runtime
+`codex_atif.py`, builds them from the CLI's rollout alone, which `codex_rollout.RolloutTail` feeds; Gemini's,
+`gemini_atif.py`, from its session transcript (`gemini_transcript.SessionTail`) and the proxy's call records. Each
+bridge follows its tail with `tail_follow.following` (`utils/tail_follow`, which its image takes in `shared_sources.toml`
+and copies beside the bridge): read while the CLI runs and once more after it exits, a read in flight when the run ends
+fed rather than dropped. A runtime
 that only has a record at the end returns it with `native_trajectory(...)`: `agents/pi/pi_agent.py` `_result`.
 
 ### `skill-config/v1`, `/ext/skill-config`
