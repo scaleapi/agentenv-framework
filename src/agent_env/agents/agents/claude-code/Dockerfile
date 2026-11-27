@@ -17,7 +17,8 @@ RUN sh /clock/build.sh /out
 
 FROM public.ecr.aws/docker/library/python:3.11-slim@sha256:c20888b6acdd1e63e1c433a185bf3ad162c0288fe484616ce062e0d28add2900
 # poppler-utils: the CLI's Read tool runs pdftoppm for a PDF's pages.
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl poppler-utils \
+# jq: the CLI saves an MCP result over its token cap to a file and tells the model to query it with jq.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl jq poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 # Claude Code's native build for this machine's platform, checked against its release manifest. a2a_server's _usage
 # relies on this version's usage reports: `modelUsage` counts every call, subagents' too, and a resume restores the
