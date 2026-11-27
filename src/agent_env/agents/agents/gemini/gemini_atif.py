@@ -4,7 +4,8 @@ ATIF. The stream-json events on stdout are the native log, but they carry no tho
 the transcript holds each model response whole once the CLI has run its calls, and the proxy each call's own usage.
 
 A step is one model response, keyed by its message's id: its thoughts as summary reasoning, its text, its calls with
-their results, and the usage of the proxy's call whose input it names, else the transcript's own count. A call the
+their results, and the usage of the proxy's last call to end before the CLI wrote the message, unless that call
+names another input, else the transcript's own count. A call the
 proxy forwarded that wrote no message, as the CLI's routing and next-speaker checks, is a step with its usage alone,
 and one the endpoint refused is a step with no model call holding the error, which the CLI's own report of a failed
 turn replaces when the turn ended there."""
@@ -16,7 +17,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from agentenv_protocol.atif import Adapter, Native, atif_adapter, aux, finish, native
+from agentenv_protocol.atif import Adapter, Native, atif_adapter, aux, finish, is_token_count, native
 
 NATIVE_FORMAT = "gemini-stream-json/1"
 #: The CLI versions the recorded fixtures come from; a unit test holds package.json's pin to this list.
@@ -33,23 +34,22 @@ def _string(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _token_count(value: Any) -> int | None:
-    """``value`` when it counts tokens: the adapter imports only what its protocol floor has."""
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+def _count(value: Any) -> int | None:
+    return value if is_token_count(value) else None
 
 
 def _usage(counts: Any) -> dict[str, int]:
     """A proxy record's counts as the step's: its input holds the cache, its output the thoughts."""
     if not _is_mapping(counts):
         return {}
-    return {name: count for name in _COUNTS if (count := _token_count(counts.get(name))) is not None}
+    return {name: counts[name] for name in _COUNTS if is_token_count(counts.get(name))}
 
 
 def _transcript_inputs(tokens: Any) -> int | None:
     """A response's input as the proxy counts it: the prompt, its cache included, and a tool-use prompt, which the
     transcript counts apart."""
-    inputs = _token_count(tokens.get("input")) if _is_mapping(tokens) else None
-    return None if inputs is None else inputs + (_token_count(tokens.get("tool")) or 0)
+    inputs = _count(tokens.get("input")) if _is_mapping(tokens) else None
+    return None if inputs is None else inputs + (_count(tokens.get("tool")) or 0)
 
 
 def _transcript_usage(tokens: Any) -> dict[str, int]:
@@ -57,9 +57,9 @@ def _transcript_usage(tokens: Any) -> dict[str, int]:
     the thoughts."""
     if not _is_mapping(tokens):
         return {}
-    output = _token_count(tokens.get("output"))
-    counts = {"input_tokens": _transcript_inputs(tokens), "cache_read_tokens": _token_count(tokens.get("cached")),
-              "output_tokens": None if output is None else output + (_token_count(tokens.get("thoughts")) or 0)}
+    output = _count(tokens.get("output"))
+    counts = {"input_tokens": _transcript_inputs(tokens), "cache_read_tokens": _count(tokens.get("cached")),
+              "output_tokens": None if output is None else output + (_count(tokens.get("thoughts")) or 0)}
     return {name: count for name, count in counts.items() if count is not None}
 
 
@@ -129,23 +129,16 @@ class GeminiAtif(Adapter):
 
     def _match(self, inputs: int | None, written: datetime | None) -> int | None:
         """Which of the proxy's calls not yet written made the response counting ``inputs``, its message written at
-        ``written``: of the calls that had ended by then, the CLI writing a response's message once its call ends, the
-        first answered with that input, else one whose counts the proxy couldn't read ahead of every answered call,
-        which may be later messages'; the calls before it wrote no message. None when no call did, as for a response
-        the proxy didn't see, and the response takes the transcript's count."""
-        ended = len(self._calls)
-        if written is not None:
-            ended = next((index for index, call in enumerate(self._calls)
-                          if (end := _instant(call.get("timestamp"))) is not None and end > written), ended)
-        outcomes = [call.get("outcome") for call in self._calls[:ended]]
-        for index, call in enumerate(self._calls[:ended]):
-            if outcomes[index] == "answered" and inputs is not None \
-                    and _usage(call.get("usage")).get("input_tokens") == inputs:
-                return index
-        for index, outcome in enumerate(outcomes):
-            if outcome == "answered":
-                return None
-            if outcome == "unreported":
+        ``written``: the latest that had ended by then and doesn't gainsay it, neither refused nor answered naming
+        another input. The CLI writes a response's message just after its call ends, and makes the next call only
+        after that, so a call that ended later is a later message's. The calls before it wrote no message. None when
+        no call did, as for a response the proxy didn't see, and the response takes the transcript's count."""
+        ended = next((index for index, call in enumerate(self._calls) if written is not None
+                      and (end := _instant(call.get("timestamp"))) is not None and end > written), len(self._calls))
+        for index in reversed(range(ended)):
+            call = self._calls[index]
+            if call.get("outcome") == "unreported" or call.get("outcome") == "answered" and (
+                    inputs is None or _usage(call.get("usage")).get("input_tokens") == inputs):
                 return index
         return None
 
@@ -187,7 +180,7 @@ class GeminiAtif(Adapter):
             metrics = step.get("metrics") if _is_mapping(step.get("metrics")) else {}
             for key, name in (("prompt_tokens", "input_tokens"), ("completion_tokens", "output_tokens"),
                               ("cached_tokens", "cached")):
-                if _token_count(metrics.get(key)) is not None:
+                if is_token_count(metrics.get(key)):
                     stats[name] = stats.get(name, 0) + metrics[key]
             results = {result.get("source_call_id"): result
                        for result in (step.get("observation") or {}).get("results") or ()}

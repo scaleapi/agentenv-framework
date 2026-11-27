@@ -125,8 +125,10 @@ def test_a_tool_use_prompt_counts_as_the_proxy_counts_it():
 
 
 def test_a_call_that_wrote_no_message_is_a_step_with_its_usage_alone_in_its_place():
-    feed = Feed().call().call(inputs=900, output=3).call(inputs=7500, output=10)
-    feed.message("m-1", "first", tokens={"input": 7338, "output": 77, "thoughts": 105})
+    feed = Feed().call()
+    written = Feed.at()
+    feed.call(inputs=900, output=3).call(inputs=7500, output=10)
+    feed.message("m-1", "first", tokens={"input": 7338, "output": 77, "thoughts": 105}, at=written)
     feed.message("m-2", "second", tokens={"input": 7500, "output": 10}).call(inputs=950, output=2).result()
     steps = agent_steps(run(feed).document)
 
@@ -266,10 +268,7 @@ def test_a_seeded_sessions_copy_holds_every_response_and_every_call_the_proxy_fo
     feeds, want = seeded_session(seed)
     steps = agent_steps(run(*feeds).document)
 
-    # A call the proxy couldn't count whose message an answered call came ahead of is a step of its own, with no usage.
-    surplus = len(steps) - want["steps"]
-    assert 0 <= surplus <= want["unreported"]
-    assert sum(step["llm_call_count"] == 1 and "metrics" not in step for step in steps) >= surplus
+    assert len(steps) == want["steps"]
     assert sum(step.get("metrics", {}).get("prompt_tokens", 0) for step in steps) == want["input"]
     assert sum(step.get("metrics", {}).get("completion_tokens", 0) for step in steps) == want["output"]
     assert [step["message"] for step in steps if step["message"]] == [text for text in want["messages"] if text]
@@ -279,13 +278,21 @@ def test_a_seeded_sessions_copy_holds_every_response_and_every_call_the_proxy_fo
     assert sorted(calls) == sorted(want["calls"]) and set(calls) <= results
 
 
-def test_a_response_isnt_joined_to_a_call_the_proxy_couldnt_count_past_an_answered_one():
+def test_a_response_takes_the_last_call_to_end_before_its_message_one_the_proxy_couldnt_count_too():
     feed = Feed().call(inputs=900, output=2).call(outcome="unreported")
     feed.message("m-1", "ok", tokens={"input": 7338, "output": 77, "thoughts": 105}).result()
     steps = agent_steps(run(feed).document)
 
-    assert [step["message"] for step in steps] == ["ok", "", ""]
-    assert [step.get("metrics", {}).get("prompt_tokens") for step in steps] == [7338, 900, None]
+    assert [step["message"] for step in steps] == ["", "ok"]
+    assert [step["metrics"]["prompt_tokens"] for step in steps] == [900, 7338]
+
+
+def test_a_call_that_ended_after_the_responses_own_one_but_before_its_message_doesnt_take_it():
+    feed = Feed().call(inputs=7338, output=20).call(inputs=900, output=2)
+    feed.message("m-1", "ok", tokens={"input": 7338, "output": 20}).result()
+    steps = agent_steps(run(feed).document)
+
+    assert [(step["message"], step["metrics"]["prompt_tokens"]) for step in steps] == [("ok", 7338), ("", 900)]
 
 
 def test_a_response_takes_its_own_uncounted_call_not_the_next_answered_one_of_the_same_input():

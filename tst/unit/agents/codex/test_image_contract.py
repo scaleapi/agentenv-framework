@@ -79,7 +79,7 @@ def test_the_requirements_are_the_protocol_floor_the_config_writer_the_relays_ht
     requirements = [line for line in (AGENT_DIR / "requirements.txt").read_text().splitlines()
                     if line and not line.startswith("#")]
 
-    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.643", "tomli-w==1.2.0", "aiohttp>=3.9,<4",
+    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.660", "tomli-w==1.2.0", "aiohttp>=3.9,<4",
                             "certifi"]
 
 

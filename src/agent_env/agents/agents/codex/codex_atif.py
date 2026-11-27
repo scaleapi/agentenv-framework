@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from agentenv_protocol.atif import Adapter, Native, atif_adapter, aux, finish, native
+from agentenv_protocol.atif import Adapter, Native, atif_adapter, aux, finish, is_token_count, native
 
 NATIVE_FORMAT = "codex-exec-json/1"
 #: The CLI versions the recorded fixtures come from; a unit test holds package.json's pin to this list.
@@ -37,15 +37,10 @@ def _is_mapping(value: Any) -> bool:
     return isinstance(value, dict)
 
 
-def _token_count(value: Any) -> int | None:
-    """``value`` when it counts tokens: the adapter imports only what its protocol floor has."""
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
-
-
 def _usage(counts: Any) -> dict[str, int]:
     if not _is_mapping(counts):
         return {}
-    return {name: count for key, name in _COUNTS if (count := _token_count(counts.get(key))) is not None}
+    return {name: counts[key] for key, name in _COUNTS if is_token_count(counts.get(key))}
 
 
 def _texts(content: Any) -> list[str]:
@@ -267,7 +262,7 @@ class CodexAtif(Adapter):
             metrics = step.get("metrics") if _is_mapping(step.get("metrics")) else {}
             for key, name in (("prompt_tokens", "input_tokens"), ("cached_tokens", "cached_input_tokens"),
                               ("completion_tokens", "output_tokens")):
-                if _token_count(metrics.get(key)) is not None:
+                if is_token_count(metrics.get(key)):
                     usage[name] = usage.get(name, 0) + metrics[key]
             if _string(step.get("reasoning_content")):
                 item({"type": "reasoning", "text": step["reasoning_content"]})
