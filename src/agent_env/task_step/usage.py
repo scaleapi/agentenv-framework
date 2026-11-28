@@ -149,8 +149,8 @@ class RoleUsage:
 
     def _by_model(self, counted: list[Usage], prices: PriceTable) -> list[tuple[ModelEntry, Cost]]:
         """The turns' counts by model, each priced at its own model's rate: a turn's ``models``, and a turn without them
-        counted as the role's model's. A row says its own writes by how long they were kept; the one row of a turn
-        that ran one model takes the turn's when it doesn't, as an older agent's row may not."""
+        counted as the role's model's. A row says its own writes by how long they were kept, or takes them from its
+        turn (``_row_ttl``) when it doesn't, as an older agent's row may not."""
         shares: dict[Optional[str], list[Any]] = {}
         charged: dict[Optional[str], list[dict[str, Any]]] = {}
         for usage in counted:
@@ -158,8 +158,8 @@ class RoleUsage:
                 for share in usage.models:
                     shares.setdefault(share.model, []).append(share)
                     record = share.to_dict()
-                    if share.cache_write_ttl_tokens is None and len(usage.models) == 1 and usage.cache_write_ttl_tokens:
-                        record["cache_write_ttl_tokens"] = dict(usage.cache_write_ttl_tokens)
+                    if share.cache_write_ttl_tokens is None and (ttl := _row_ttl(usage, share)) is not None:
+                        record["cache_write_ttl_tokens"] = ttl
                     charged.setdefault(share.model, []).append(record)
             else:
                 shares.setdefault(self.model, []).append(usage)
@@ -185,6 +185,24 @@ def _tokens(records: list[Any]) -> Optional[Tokens]:
     when one lacks its input or output, so a sum that can't be charged in full isn't priced short."""
     charged = [Tokens.of(record if isinstance(record, dict) else record.to_dict()) for record in records]
     return reduce(operator.add, charged) if charged and None not in charged else None
+
+
+def _row_ttl(usage: Usage, share: Any) -> Optional[dict[str, int]]:
+    """The writes by time a per-model row that gives none takes from its turn: the turn's when it ran one model; all
+    the row's writes at one time when the turn kept every write that time; else None, since writes kept different
+    times can't be told apart by model."""
+    turn = {label: count for label, count in (usage.cache_write_ttl_tokens or {}).items() if count}
+    if not turn:
+        return None
+    if len(usage.models) == 1:
+        return turn
+    if len(turn) != 1:
+        return None
+    [(label, count)] = turn.items()
+    writes = usage.cache_write_tokens
+    if writes is None:
+        writes = sum(row.cache_write_tokens or 0 for row in usage.models)
+    return {label: share.cache_write_tokens or 0} if count >= writes else None
 
 
 def _agreed(records: list[Any]) -> Optional[bool]:

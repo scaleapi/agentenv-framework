@@ -221,3 +221,26 @@ def test_a_row_whose_writes_were_kept_twelve_hours_is_charged_that_times_rate(mo
     sonnet_row, _ = entry["models"]
     assert sonnet_row["cost_usd"] == pytest.approx(0.011775 + 500 * (7.5 - 3.75) / 1e6)
     assert sonnet_row["cache_write_ttl_tokens"] == {"12h": 500} and "cost_assumed" not in entry
+
+
+def test_rows_that_give_no_times_take_the_one_time_their_turn_kept_every_write(monkeypatch):
+    prices = PriceTable({SONNET: ModelPrice(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75,
+                                            cache_write_ttl={43200: 7.5}),
+                         HAIKU: ModelPrice(input=1.0, output=5.0, cache_read=0.1, cache_write=1.25)}, "litellm@test")
+    twelve = {"cache_write_tokens_details": {"ttl_12h_tokens": 500}}
+
+    entry = _entry(monkeypatch, replace(TURN, provider_details=twelve), prices=prices)
+
+    sonnet_row, _ = entry["models"]
+    assert sonnet_row["cost_usd"] == pytest.approx(0.011775 + 500 * (7.5 - 3.75) / 1e6)
+    assert sonnet_row["cache_write_ttl_tokens"] == {"12h": 500} and "cost_assumed" not in entry
+
+
+def test_a_rows_own_times_come_before_its_turns(monkeypatch):
+    sonnet = replace(SONNET_SHARE, cache_write_ttl_tokens={"5m": 500})
+    turn = replace(TURN, models=(sonnet, HAIKU_SHARE), provider_details=_split(500))
+
+    entry = _entry(monkeypatch, turn, prices=HOURLY)
+
+    sonnet_row, _ = entry["models"]
+    assert sonnet_row["cost_usd"] == pytest.approx(0.011775) and "cache_write_ttl_tokens" not in sonnet_row
