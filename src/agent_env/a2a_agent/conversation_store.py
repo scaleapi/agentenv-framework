@@ -62,6 +62,7 @@ def create_conversation(
     task_instance_id: str,
     source_agent_name: str,
     target_agent_name: str,
+    step_id: Optional[str] = None,
 ) -> dict:
     """Insert a new conversation in the `active` state with empty messages and a2a_tasks.
 
@@ -71,6 +72,9 @@ def create_conversation(
     user-sim name like "hana_kim"), target=the solver's in-task DAG name. For
     HITL where a solver consults a human peer: source=the solver's name,
     target="human_agent".
+
+    `step_id`, when given, is the step that owns the conversation, so a re-run of
+    that step can close what an earlier run left open (`close_active_for_step`).
 
     Raises `agent_env.store.DuplicateKeyError` if `conversation_id` already
     exists — callers should treat that as "use the existing conversation."
@@ -89,6 +93,8 @@ def create_conversation(
         "created_at_utc": now,
         "updated_at_utc": now,
     }
+    if step_id is not None:
+        doc["step_id"] = step_id
     _doc_store().insert(_COLLECTION_NAME, doc)
     return doc
 
@@ -351,6 +357,17 @@ def mark_closed(conversation_id: str) -> Optional[dict]:
     raise RuntimeError(
         f"mark_closed: rev CAS did not converge for conversation_id={conversation_id}"
     )
+
+
+def close_active_for_step(task_instance_id: str, step_id: str) -> list[str]:
+    """Close every active conversation step `step_id` of `task_instance_id` created; return their ids."""
+    active = _doc_store().query(
+        _COLLECTION_NAME, Filter.of(task_instance_id=task_instance_id, step_id=step_id, status="active")
+    )
+    closed = [doc["conversation_id"] for doc in active]
+    for conversation_id in closed:
+        mark_closed(conversation_id)
+    return closed
 
 
 def list_pending(limit: int = 50) -> list[dict]:
