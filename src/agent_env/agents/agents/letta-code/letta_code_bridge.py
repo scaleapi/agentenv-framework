@@ -22,10 +22,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agentenv_protocol.a2a_agent import Usage
+from agentenv_protocol.a2a_agent.clock import follows
+from agentenv_protocol.computer.clock import session_time
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
 from agent_egress import clock_armed, egress_env
-from model_relay import Calls, model_relay
+from model_relay import Calls, model_relay, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -418,10 +420,13 @@ async def run_letta_code(
     output_format: dict | None = None, timeout_s: int = 600, project_id: str | None = None,
     task_id: str | None = None, role: str | None = None, attachment_paths: list[str] | None = None,
     effort: str | None = None, event_callback: Callable[[dict], None] | None = None, workspace: str = "/app",
+    aux_callback: Callable[[str, dict], None] | None = None,
 ) -> LettaCodeResult:
     """A bounded CLI turn, including provider setup; cancellation kills the process tree. Its usage is what its model
-    relay counted: every model call the CLI and the processes it started made, its subagents' and summaries' too."""
-    calls = Calls()
+    relay counted: every model call the CLI and the processes it started made, its subagents' and summaries' too. With
+    ``aux_callback``, each of those calls is fed to it as it ends, the atif/1 adapter's ``calls`` aux record."""
+    calls = Calls() if aux_callback is None else Calls(sink=lambda record: aux_callback("calls", record),
+                                                      clock=_session_now if follows() else utc_now)
     try:
         async with asyncio.timeout(timeout_s):
             result = await _turn(prompt, context_id, session_id, model, mcp_servers, system_prompt, output_format,
@@ -434,6 +439,12 @@ async def run_letta_code(
             _record_attribution(project_id, task_id)
     result.usage = calls.usage(result.tool_call_count, model)
     return result
+
+
+def _session_now() -> datetime:
+    """The time the CLI's own records carry, the env's while the image follows its clock, as the SDK stamps the atif/1
+    steps it writes: the relay's server stays on real time."""
+    return datetime.fromtimestamp(session_time(), timezone.utc)
 
 
 async def _turn(prompt, context_id, session_id, model, mcp_servers, system_prompt, output_format,

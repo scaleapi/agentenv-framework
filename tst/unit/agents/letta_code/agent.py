@@ -16,6 +16,7 @@ IMPORTED = [str(AGENT_DIR), str(sent(AGENT_DIR, "agent_clock/agent_egress.py").p
             str(sent(AGENT_DIR, "clock/clockpage.py").parent), str(sent(AGENT_DIR, "model_relay/model_relay.py").parent)]
 PYTHONPATH = os.pathsep.join(IMPORTED)
 sys.path[:0] = IMPORTED
+letta_code_atif = importlib.import_module("letta_code_atif")
 letta_code_bridge = importlib.import_module("letta_code_bridge")
 letta_code_kit = importlib.import_module("letta_code_kit")
 agent_egress = importlib.import_module("agent_egress")

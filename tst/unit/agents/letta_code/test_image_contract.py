@@ -43,8 +43,8 @@ def test_every_file_the_image_copies_is_in_the_folder():
 
     assert copied and all(_in_context(name) for name in copied), copied
     # install.sh and run.sh are install/v1's; a build context pruned to what the Dockerfile reads keeps them so.
-    assert {"a2a_server.py", "letta_code_bridge.py", "letta_code_kit.py", "mcp_tools.ts", "entrypoint.sh", "install.sh",
-            "run.sh", "package.json", "package-lock.json", "requirements.txt"} <= set(copied)
+    assert {"a2a_server.py", "letta_code_atif.py", "letta_code_bridge.py", "letta_code_kit.py", "mcp_tools.ts",
+            "entrypoint.sh", "install.sh", "run.sh", "package.json", "package-lock.json", "requirements.txt"} <= set(copied)
 
 
 def _imported(path) -> set[str]:
@@ -69,7 +69,7 @@ def test_the_image_and_an_install_carry_every_module_the_server_imports():
     # Not imported: the bridge copies it into each context as the mod that registers the env's MCP tools.
     needed.add("mcp_tools.ts")
 
-    assert {"agent_clock/agent_egress.py", "clock/clockpage.py", "letta_code_bridge.py"} <= needed
+    assert {"agent_clock/agent_egress.py", "clock/clockpage.py", "letta_code_atif.py", "letta_code_bridge.py"} <= needed
     assert needed <= set(_copied()) and needed <= _installed(), (needed, _installed())
     assert all(_in_context(name) for name in _installed())
 
