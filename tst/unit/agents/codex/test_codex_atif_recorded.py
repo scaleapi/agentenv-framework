@@ -5,7 +5,7 @@ records and its turn context, replayed through the adapter kit as the SDK ran it
 The scenarios: ``coding`` (two turns of one conversation), ``browser`` (a screenshot a browser's MCP tool returned to
 the model), ``reasoning`` (a high reasoning effort), ``refused`` (the endpoint refusing every call), ``retried`` (a
 failed attempt the bridge resumed), ``subagent`` (a spawned sub-agent) and ``forked`` (a second turn's sub-agent forked
-with the conversation so far, whose rollout begins with a copy of it).
+with the conversation so far, whose rollout begins with a copy of it, on gpt-6.2-astra in the CLI's code mode).
 Regenerate the expected documents after an intended change with: python
 tst/unit/agents/codex/test_codex_atif_recorded.py. Record the runs again, as a bump of the pinned CLI asks, with
 ``tst/manual/codex_gemini_atif/record.py``, whose docstring has the steps."""

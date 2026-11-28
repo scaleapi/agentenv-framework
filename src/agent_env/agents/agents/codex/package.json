@@ -1,7 +1,7 @@
 {
   "private": true,
   "dependencies": {
-    "@openai/codex": "0.162.1",
+    "@openai/codex": "0.172.0",
     "mcp-remote": "0.14.3"
   }
 }

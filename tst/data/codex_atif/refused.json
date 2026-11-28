@@ -1,17 +1,17 @@
 {
  "scenario": "refused",
- "cli": "0.162.1",
+ "cli": "0.172.0",
  "turns": [
   {
    "turn": {
     "index": 0,
     "context_id": "ctx-codex-refused",
-    "task_id": "7de2a29f-52c8-4a60-9dfb-00e7521aab95",
-    "message_id": "4a260f1cdfb2499babf455a316dd373f",
+    "task_id": "dbcab610-c143-4fca-983d-07b4b7cdb7c8",
+    "message_id": "b1c5e276450846cb9cc2ef52e7faadff",
     "agent_name": "Codex",
     "agent_version": "1.0.0",
     "agent_model": "gpt-5.5",
-    "started_at": "2026-11-26T04:36:19.968615Z",
+    "started_at": "2026-11-28T05:58:17.020737Z",
     "inbound": [
      "Reply with ok."
     ],
@@ -19,13 +19,13 @@
     "final": [
      "codex CLI exited with code 1: refused by the recording proxy [400]"
     ],
-    "ended_at": "2026-11-26T04:36:20.421907Z",
+    "ended_at": "2026-11-28T05:58:17.561131Z",
     "data": [
      {
       "data": {
        "tool_call_count": 0,
        "warnings": [
-        "{\"type\": \"error\", \"message\": \"{\\\"error\\\": {\\\"message\\\": \\\"refused by the recording proxy\\\", \\\"code\\\": 400}}\", \"timestamp\": \"2026-11-26T04:36:20.401+00:00\"}"
+        "{\"type\": \"error\", \"message\": \"{\\\"error\\\": {\\\"message\\\": \\\"refused by the recording proxy\\\", \\\"code\\\": 400}}\", \"timestamp\": \"2026-11-28T05:58:17.541+00:00\"}"
        ]
       }
      }
@@ -39,30 +39,30 @@
    "native": [
     {
      "type": "thread.started",
-     "thread_id": "01a21623-e1fe-7a12-a06f-9b66dfd67993",
-     "timestamp": "2026-11-26T04:36:20.354+00:00"
+     "thread_id": "01a220bb-a17e-76c2-b29a-334ea18aa9e1",
+     "timestamp": "2026-11-28T05:58:17.484+00:00"
     },
     {
      "type": "turn.started",
-     "timestamp": "2026-11-26T04:36:20.378+00:00"
+     "timestamp": "2026-11-28T05:58:17.518+00:00"
     },
     {
      "type": "error",
      "message": "{\"error\": {\"message\": \"refused by the recording proxy\", \"code\": 400}}",
-     "timestamp": "2026-11-26T04:36:20.401+00:00"
+     "timestamp": "2026-11-28T05:58:17.541+00:00"
     },
     {
      "type": "turn.failed",
      "error": {
       "message": "{\"error\": {\"message\": \"refused by the recording proxy\", \"code\": 400}}"
      },
-     "timestamp": "2026-11-26T04:36:20.406+00:00"
+     "timestamp": "2026-11-28T05:58:17.546+00:00"
     },
     {
      "type": "agentenv.usage",
      "usage": null,
      "model_requests": 0,
-     "timestamp": "2026-11-26T04:36:20.421+00:00"
+     "timestamp": "2026-11-28T05:58:17.560+00:00"
     }
    ],
    "aux": [
@@ -70,11 +70,11 @@
      "name": "rollout",
      "record": {
       "type": "session_meta",
-      "timestamp": "2026-11-26T04:36:20.359Z",
-      "thread": "01a21623-e1fe-7a12-a06f-9b66dfd67993",
+      "timestamp": "2026-11-28T05:58:17.490Z",
+      "thread": "01a220bb-a17e-76c2-b29a-334ea18aa9e1",
       "payload": {
-       "id": "01a21623-e1fe-7a12-a06f-9b66dfd67993",
-       "cli_version": "0.162.1"
+       "id": "01a220bb-a17e-76c2-b29a-334ea18aa9e1",
+       "cli_version": "0.172.0"
       }
      },
      "after": 2
@@ -83,8 +83,8 @@
      "name": "rollout",
      "record": {
       "type": "event_msg",
-      "timestamp": "2026-11-26T04:36:20.359Z",
-      "thread": "01a21623-e1fe-7a12-a06f-9b66dfd67993",
+      "timestamp": "2026-11-28T05:58:17.490Z",
+      "thread": "01a220bb-a17e-76c2-b29a-334ea18aa9e1",
       "payload": {
        "type": "task_started"
       }
@@ -95,20 +95,20 @@
      "name": "rollout",
      "record": {
       "type": "turn_context",
-      "timestamp": "2026-11-26T04:36:20.382Z",
-      "thread": "01a21623-e1fe-7a12-a06f-9b66dfd67993",
+      "timestamp": "2026-11-28T05:58:17.521Z",
+      "thread": "01a220bb-a17e-76c2-b29a-334ea18aa9e1",
       "payload": {
        "model": "gpt-5.5"
       }
      },
-     "after": 4
+     "after": 2
     },
     {
      "name": "rollout",
      "record": {
       "type": "event_msg",
-      "timestamp": "2026-11-26T04:36:20.401Z",
-      "thread": "01a21623-e1fe-7a12-a06f-9b66dfd67993",
+      "timestamp": "2026-11-28T05:58:17.541Z",
+      "thread": "01a220bb-a17e-76c2-b29a-334ea18aa9e1",
       "payload": {
        "type": "task_complete",
        "error": {

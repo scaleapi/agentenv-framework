@@ -17,7 +17,7 @@ from aiohttp import web
 from tst.unit.agents.codex.agent import codex_date, model_relay
 from tst.util import fake_date
 
-# The environment context as Codex 0.162.1 writes it (codex-rs core/src/context/world_state/environment.rs).
+# The environment context as Codex 0.172.0 writes it (codex-rs core/src/context/world_state/environment.rs).
 CONTEXT = ("<environment_context>\n  <cwd>/app</cwd>\n  <shell>bash</shell>\n  <current_date>2026-11-25</current_date>\n"
            "  <timezone>Etc/UTC</timezone>\n</environment_context>")
 LATER = "<environment_context>\n  <current_date>2026-11-26</current_date>\n</environment_context>"

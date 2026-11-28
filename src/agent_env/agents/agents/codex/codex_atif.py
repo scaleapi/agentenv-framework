@@ -25,7 +25,7 @@ from agentenv_protocol.atif import Adapter, Native, atif_adapter, aux, finish, i
 
 NATIVE_FORMAT = "codex-exec-json/1"
 #: The CLI versions the recorded fixtures come from; a unit test holds package.json's pin to this list.
-TESTED_WITH = ("0.162.1",)
+TESTED_WITH = ("0.172.0",)
 _CALLS = ("function_call", "custom_tool_call", "tool_search_call", "web_search_call")
 _RESULTS = ("function_call_output", "custom_tool_call_output", "tool_search_output")
 _SPAWN = "spawn_agent"
