@@ -453,14 +453,22 @@ def _descendants(pid: int) -> list[int]:
     return found
 
 
-async def run_opencode(prompt: str, context_id: str, **kwargs) -> OpencodeResult:
+async def run_opencode(prompt: str, context_id: str, *, aux_callback: Callable[[str, dict], None] | None = None,
+                       **kwargs) -> OpencodeResult:
     """Run one turn, ``_run_opencode``'s, with OpenCode's provider pointed at a model relay of the turn's own, which
     counts every model call the CLI makes: its steps', its subagents' sessions', its compaction's, its title's and its
     answered retries'. The turn's usage is theirs, a call answered without usage counted as unreported. The relay
-    tells the model the env's date on an armed clock (``opencode_date``)."""
-    calls = Calls()
+    tells the model the env's date on an armed clock (``opencode_date``).
+
+    ``aux_callback``, given when the task builds an atif/1 copy, gets the ATIF adapter's aux records: the turn's model
+    and effort (``turn``), then each call the relay forwards as it ends (``calls``), on the real time the CLI's events
+    are on; and the CLI prints the model's reasoning too."""
+    calls = Calls() if aux_callback is None else Calls(sink=lambda record: aux_callback("calls", record))
+    if aux_callback is not None:
+        aux_callback("turn", {"type": "agentenv.turn", "model": kwargs.get("model") or DEFAULT_MODEL,
+                              "effort": kwargs.get("effort")})
     async with model_relay(_base_url(os.environ).removesuffix("/v1"), calls, rewrite=env_date_rewrite) as relay:
-        result = await _run_opencode(prompt, context_id, base_url=relay, **kwargs)
+        result = await _run_opencode(prompt, context_id, base_url=relay, thinking=aux_callback is not None, **kwargs)
     result.usage = calls.usage(result.tool_call_count, kwargs.get("model"))
     return result
 
@@ -487,6 +495,7 @@ async def _run_opencode(
     max_turns: int | None = None,
     base_url: str | None = None,
     max_output_tokens: int | None = None,
+    thinking: bool = False,
 ) -> OpencodeResult:
     """Run one `opencode run` turn in ``workspace``, its provider calling ``base_url``, the endpoint's when None. ``event_callback`` gets each JSON event as the CLI prints it:
     exactly the events of the returned trajectory, in order. ``builtin_tools`` selects the CLI's own tools, and
@@ -498,7 +507,8 @@ async def _run_opencode(
     only asks the model to stop, and still offers it every tool (anomalyco/opencode#55921).
 
     ``max_output_tokens`` raises or lowers the output tokens, reasoning included, one model request may produce; None
-    keeps OpenCode's default of 32,000."""
+    keeps OpenCode's default of 32,000. ``thinking`` has the CLI print the model's reasoning too, as ``reasoning``
+    events."""
     model = model or DEFAULT_MODEL
     attribution = _attribution_headers(project_id, task_id)
     if attribution:
@@ -534,6 +544,8 @@ async def _run_opencode(
     # Were a positional message added, it must come before --file: the message is a variadic positional and --file
     # is an array flag, so yargs would swallow a message after --file into the file array ("File not found: <prompt>").
     cmd = ["opencode", "run", "--format", "json", "--model", f"litellm/{model}", "--dir", workspace]
+    if thinking:
+        cmd.append("--thinking")
     if session_id:
         cmd += ["-s", session_id]
     for path in (attachment_paths or []):

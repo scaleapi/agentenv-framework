@@ -40,7 +40,7 @@ def test_the_extensions_are_the_wrappers_and_the_attribution_probe(oc):
     assert _methods(oc.card) == {
         "urn:agentenv:agent-config/v1": ["get", "set"],
         "urn:agentenv:mcp-config/v1": ["add", "list"],
-        "urn:agentenv:trajectory/v1": ["get"],
+        "urn:agentenv:trajectory/v1": ["get", "media", "prescribe"],
         "urn:agentenv:attribution-probe/v1": ["probe"],
         "urn:agentenv:install/v1": [],
         "urn:agentenv:peer-agents/v1": ["list", "set"],

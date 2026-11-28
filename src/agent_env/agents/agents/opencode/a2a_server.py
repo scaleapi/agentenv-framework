@@ -65,6 +65,7 @@ from pydantic import Field, field_validator
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 
+from opencode_atif import OpenCodeAtif
 from opencode_bridge import (
     ERROR_MESSAGE_LIMIT,
     OpenCodeTools,
@@ -314,7 +315,7 @@ def memory_mb(cgroup_limit: Path = Path("/sys/fs/cgroup/memory.max")) -> int:
     config=OpenCodeConfig,
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT),
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT, atif=OpenCodeAtif),
         enable(ATTRIBUTION_PROBE_V1),
         enable(
             INSTALL_V1,
@@ -392,6 +393,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
                         builtin_tools=request.config.builtin_tools,
                         web_tools=request.config.web_tools,
                         event_callback=record,
+                        aux_callback=request.trajectory.aux if request.trajectory.builds_atif else None,
                         workspace=str(WORKSPACE_DIR),
                         max_turns=request.config.max_turns,
                     )
