@@ -1,11 +1,14 @@
-"""DynamoDbDocumentStore runs the full DocumentStore conformance suite against moto."""
+"""DynamoDbDocumentStore runs the full DocumentStore conformance suite, and the eval instance kit, against moto."""
 
 import pytest
 from moto import mock_aws
 
 import agent_env.store.document_store.dynamodb_document_store as dynamodb_mod
+from agent_env.config import configure, reset_config
+from agent_env.eval import instance_store
 from agent_env.store import DuplicateKeyError, DynamoDbDocumentStore, Eq, Filter, UpdateSpec
-from tst.store import conformance
+from tst.store import conformance, eval_instance_conformance
+from tst.store.eval_instance_conformance import created_instance
 
 
 @pytest.fixture
@@ -17,6 +20,29 @@ def store_coll(one_aws_call_at_a_time):
 @pytest.mark.parametrize("case", conformance.CASES, ids=lambda c: c.__name__)
 def test_conformance(case, store_coll):
     case(*store_coll)
+
+
+@pytest.mark.parametrize("case", eval_instance_conformance.CASES, ids=lambda c: c.__name__)
+def test_eval_instance_conformance(case, store_coll):
+    configure(document_store=store_coll[0])
+    try:
+        case("evals/smoke")
+    finally:
+        reset_config()
+
+
+def test_an_eval_instances_slots_are_read_by_key_not_scanned(store_coll, monkeypatch):
+    store = store_coll[0]
+    configure(document_store=store)
+    try:
+        first, _ = created_instance("evals/smoke", k=3), created_instance("evals/smoke", k=3)
+        scans = []
+        paginator = store._client.get_paginator
+        monkeypatch.setattr(store._client, "get_paginator", lambda op: scans.append(op) or paginator(op))
+        assert len(instance_store.get_slots(first.id)) == 3
+        assert scans == ["query"]
+    finally:
+        reset_config()
 
 
 def test_a_write_that_lands_between_read_and_write_is_not_lost(store_coll):

@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 KEEP_KEY = "keep"
 
@@ -96,9 +96,16 @@ class Runner(ABC):
 
     ``type`` is persisted on every run record: a hub restarted under a different
     ``[runner]`` reports on a run it does not own rather than misreporting it.
+
+    Two declarations say what an eval can rely on, and the conformance kit holds a runner to each:
+    ``runs_outlive_submitter``, that a run keeps going after the process that submitted it stops, so a resume
+    reattaches to it through ``status`` rather than submitting it again; and ``retries_infra``, that the runner runs
+    a run again itself after an infrastructure failure, so the eval engine adds no attempts of its own.
     """
 
     type: str = "runner"
+    runs_outlive_submitter: ClassVar[bool] = False
+    retries_infra: ClassVar[bool] = False
 
     @classmethod
     def from_config(cls, **config) -> Runner:

@@ -31,6 +31,8 @@ class LocalRunner(Runner):
     """In-process runner. The DocumentStore holds run records for status/listing only."""
 
     type = "local"
+    runs_outlive_submitter = False
+    retries_infra = False
     # How long a run's teardown may take, from when it starts: each sandbox gets TERMINATE_TIMEOUT_SECONDS,
     # and the folder of a local one is removed after that, outside it.
     TEARDOWN_WAIT_SECONDS = 2 * TERMINATE_TIMEOUT_SECONDS
