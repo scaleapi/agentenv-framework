@@ -3,14 +3,29 @@ recorded: one file per scenario, a context's turns, each its atif/1 final read's
 final read's events (none for a turn that failed before it had any) and the usage the turn reported. Then run the agent's recorded test as a script for the expected
 documents.
 
-    python tst/manual/agents_atif/make_fixtures.py OUT AGENT"""
+    LITELLM_BASE_URL=... python tst/manual/agents_atif/make_fixtures.py OUT AGENT"""
 import json
+import os
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 REPO = Path(__file__).resolve().parents[3]
 KEY = re.compile(r"sk-[A-Za-z0-9_-]{18,}")
+#: What a fixture names the model endpoint as, in place of the one recorded through (``LITELLM_BASE_URL``'s origin).
+ENDPOINT = "http://litellm.test"
+
+
+def scrubbed(text: str) -> str:
+    """``text`` with the recorded endpoint's origin, a deployment fact, named as ``ENDPOINT``."""
+    parts = urlsplit(os.environ.get("LITELLM_BASE_URL", ""))
+    if not parts.netloc:
+        return text
+    text = text.replace(f"{parts.scheme}://{parts.netloc}", ENDPOINT)
+    if parts.hostname in text:
+        raise SystemExit(f"the endpoint's host {parts.hostname} is still in a fixture; not written")
+    return text
 
 
 def usage_of(task: dict) -> dict | None:
@@ -38,7 +53,8 @@ def main() -> None:
                           "aux": atif.get("aux") or [], "usage": usage_of(recorded["task"])})
         if not turns:
             continue
-        text = json.dumps({"scenario": folder.name, "cli": cli, "turns": turns}, indent=1, ensure_ascii=False) + "\n"
+        text = scrubbed(json.dumps({"scenario": folder.name, "cli": cli, "turns": turns}, indent=1,
+                                   ensure_ascii=False) + "\n")
         if KEY.search(text):
             raise SystemExit(f"{folder.name}: a key-like string; not written")
         (fixtures / f"{folder.name}.json").write_text(text)
