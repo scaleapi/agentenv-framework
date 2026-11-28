@@ -14,12 +14,14 @@ import httpx
 
 from .manifest import INTERFACE_MANIFEST_PATH
 from .transfers import WriteNamespaceGrant
+from . import _connect
 from .types import CONTROL_TOKEN_HEADER, INTAKE_EXTENSION_URI, MCP_PATH, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataResponse, GetDataResponse, Part, ResetDataResponse
 
 logger = logging.getLogger(__name__)
 
 #: The headers that carry the control token of each env address the running code is granted, by address.
 _GRANTS: ContextVar[dict[str, dict[str, str]]] = ContextVar("agentenv_control_grants", default={})
+_RETRY_EXTENSION_CONNECTIONS = ContextVar("agentenv_retry_extension_connections", default=False)
 
 
 class ExtensionCallError(httpx.HTTPStatusError):
@@ -361,6 +363,16 @@ async def get_interface_manifest(base_url: str, interface: str, endpoint: str = 
         return response.json()
 
 
+@contextlib.contextmanager
+def retry_extension_connections() -> Iterator[None]:
+    """Allow up to three connection attempts for extension calls made in this context, before sending the request."""
+    token = _RETRY_EXTENSION_CONNECTIONS.set(True)
+    try:
+        yield
+    finally:
+        _RETRY_EXTENSION_CONNECTIONS.reset(token)
+
+
 async def invoke_extension(base_url: str, card: dict, uri: str, params: dict | None = None, timeout: int = 30, verify: bool = True, *, method: str | None = None,
                            headers: dict[str, str] | None = None):
     """Invoke a card extension via its advertised REST endpoint.
@@ -383,7 +395,11 @@ async def invoke_extension(base_url: str, card: dict, uri: str, params: dict | N
     url = f"{base_url.rstrip('/')}{op['endpoint']}"
     sent = request_headers(url, headers)
     async with httpx.AsyncClient(verify=verify) as client:
-        if op["method"] == "GET":
+        if _RETRY_EXTENSION_CONNECTIONS.get():
+            arguments = {"params": params or {}} if op["method"] == "GET" else {"json": params or {}}
+            request = client.build_request(op["method"], url, headers=sent, timeout=timeout, **arguments)
+            response = await _connect.send(client, request)
+        elif op["method"] == "GET":
             response = await client.get(url, params=params or {}, timeout=timeout, headers=sent)
         else:
             response = await client.request(op["method"], url, json=params or {}, timeout=timeout, headers=sent)

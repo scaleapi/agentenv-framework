@@ -8,6 +8,7 @@ from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEn
 from agent_env.env.gateway.constants import EXT_CLOCK_URI, WELL_KNOWN_PATH
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.task_step.task_steps import sync_env_clock as mod
+from agent_env.task_step.task_steps.set_env_clock_rate import SetEnvClockRateTaskStep
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep, resolve_virtual_time
 
 T0 = "2026-01-01T00:00:00Z"
@@ -94,7 +95,7 @@ async def test_sync_one_skips_or_raises_for_a_child_env_missing_from_the_stored_
 
 @pytest.mark.asyncio
 async def test_execute_syncs_each_child_env_through_the_stored_card(monkeypatch):
-    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL}, fail_first_connection=True)
     monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a, **k: SimpleNamespace(environment_name="email"))
     context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_CLOCK_EXT]}))])
 
@@ -106,6 +107,15 @@ async def test_execute_syncs_each_child_env_through_the_stored_card(monkeypatch)
     ]
     assert json.loads(sent[0].content) == {"virtual_time": T0, "virtual_seconds_per_real_second": 1.0}
     assert [s["service"] for s in context.metadata["clock_configurations"][0]["synced"]] == ["email"]
+
+
+@pytest.mark.asyncio
+async def test_clock_rate_change_retries_before_sending(monkeypatch):
+    sent = _mock_http(monkeypatch, fail_first_connection=True)
+    context = TaskStepContext(deployed_envs=[_carded(await _composed_card({}))])
+    step = SetEnvClockRateTaskStep(id="rate", version=None, env_id="e1", virtual_seconds_per_real_second=2)
+    await step.execute(context)
+    assert [(r.method, str(r.url)) for r in sent] == [("PUT", f"{_CARD}/clock/set-rate")]
 
 
 @pytest.mark.asyncio
@@ -284,13 +294,17 @@ def _carded(card: dict) -> DeployedEnv:
     return DeployedGatewayEnv(env_id="e1", env_version=1, gateway_url="http://gw", mcp_url="http://gw/mcp", sandbox_id="sb-1", environment_card_url=f"{_CARD}{WELL_KNOWN_PATH}", environment_card=card)
 
 
-def _mock_http(monkeypatch, state: dict | None = None, set_time_status: int = 200):
+def _mock_http(monkeypatch, state: dict | None = None, set_time_status: int = 200, *, fail_first_connection: bool = False):
     """Record every request: `/clock/state` answers `state`, `/clock/set-time` `set_time_status`, anything else an empty object."""
     import httpx
 
     sent, real = [], httpx.AsyncClient
+    refused = set()
 
     def handle(request: httpx.Request) -> httpx.Response:
+        if fail_first_connection and request.url.path not in refused:
+            refused.add(request.url.path)
+            raise httpx.ConnectTimeout("connection timed out before sending")
         sent.append(request)
         if request.url.path.endswith("/clock/set-time"):
             return httpx.Response(set_time_status, json={})

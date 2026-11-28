@@ -276,6 +276,19 @@ extension's, and `client.invoke_extension(base_url, card, uri, params, method=..
 its HTTP verb. Without `method`, `invoke_extension` calls the first method listed; an extension
 with several methods, such as a gateway's `urn:agentenv:clock/v1`, should always be called by name.
 
+An extension call makes one connection attempt by default. Wrap a call in
+`client.retry_extension_connections()` to retry a transient connection failure before sending.
+
+```python
+with client.retry_extension_connections():
+    state = await client.invoke_extension(url, card, "urn:agentenv:clock/v1", {}, method="state")
+```
+
+TCP and TLS share the connection budget from `timeout`, including waits of 0.5 and 1 second if
+there is time for a second or third attempt. Once the request starts sending, read and write
+errors propagate with HTTPX's usual inactivity timeouts. The framework opts in when setting up
+the environment clock and tool access.
+
 An extension with several methods is served by giving each handler an `op`. Handlers sharing a URI
 merge into one card entry, each method under `params.methods.<op>` with its own verb and endpoint,
 by default `/agentenv/ext/<extension>/<op>`, where `<extension>` is the URN's name without

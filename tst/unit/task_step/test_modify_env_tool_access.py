@@ -20,7 +20,7 @@ _GATEWAY = "http://gw:18765"
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["disable", "enable"])
 async def test_posts_the_action_as_the_card_declares_it_and_records_the_role_state(monkeypatch, action):
-    sent = _mock_gateway(monkeypatch, {"ok": True, "disabled": ["slack_send"], "allowed": []})
+    sent = _mock_gateway(monkeypatch, {"ok": True, "disabled": ["slack_send"], "allowed": []}, fail_first_connection=True)
     ctx = TaskStepContext(deployed_envs=[_record()], metadata={})
 
     out = await _step(action).execute(ctx)
@@ -63,11 +63,15 @@ def _record(extensions: list = GATEWAY_EXTENSIONS) -> DeployedEnv:
                        environment_card={"name": "gw", "capabilities": {"extensions": extensions}})
 
 
-def _mock_gateway(monkeypatch, body: dict, status: int = 200) -> list[httpx.Request]:
+def _mock_gateway(monkeypatch, body: dict, status: int = 200, *, fail_first_connection: bool = False) -> list[httpx.Request]:
     """Answer every request the protocol client sends with `body`; return the requests."""
     sent, real = [], httpx.AsyncClient
 
     def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal fail_first_connection
+        if fail_first_connection:
+            fail_first_connection = False
+            raise httpx.ConnectError("connection refused before sending")
         sent.append(request)
         return httpx.Response(status, json=body)
 
