@@ -323,6 +323,28 @@ def test_a_failed_tool_call_is_its_result_with_the_error():
                           "result": None, "error": "exit status 1", "call_ref": "s1"}
 
 
+class _Unwritable(ToolResult):
+    """A hook result pydantic can't write as JSON, as one holding bytes that aren't text."""
+
+    def model_dump(self, mode=None, exclude=None, warnings=True):
+        if mode == "json":
+            raise ValueError("Unable to serialize unknown type: <class 'bytes'>")
+        return super().model_dump(mode=mode, exclude=exclude, warnings=warnings)
+
+
+def test_a_result_pydantic_cant_write_as_json_has_its_value_as_text_and_no_error():
+    """Only what JSON can't hold becomes text: the error it has none of stays null, not "None", a failure to a reader."""
+    _, events = _run(Turn(steps=[
+        ("call", ToolCall(id="h1", name="run_command")),
+        ("chunk", ToolCall(id="s1", name="run_command", step_index=0)),
+        ("result", _Unwritable(id="h1", name="run_command", step_id="c:4", result={"output": b"\xff"}, error=None,
+                               server_name=None)),
+    ]))
+
+    assert events[-1] == {"kind": "tool_result", "id": "h1", "name": "run_command", "step_id": "c:4",
+                          "result": "{'output': b'\\xff'}", "error": None, "server_name": None, "call_ref": "s1"}
+
+
 def test_a_result_whose_call_never_streamed_is_kept_unlinked():
     _, events = _run(Turn(steps=[
         ("call", ToolCall(id="h1", name="run_command")),

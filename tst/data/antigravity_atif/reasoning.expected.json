@@ -1,0 +1,52 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-antigravity-reasoning",
+ "agent": {
+  "name": "Antigravity",
+  "version": "1.0.0",
+  "model_name": "gemini-2.5-flash"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T07:00:15.591734Z",
+   "source": "user",
+   "message": "Think it through, then reply with only the 20th Fibonacci number, counting F(1) = F(2) = 1.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-antigravity-reasoning",
+     "task_id": "67601f81-1e4e-4761-a707-5c1c9f9bdb66",
+     "message_id": "0de89f0a6aef401aa36d7dbeb216b387",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T07:00:17.868Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "reasoning_effort": "high",
+   "message": "6765",
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_steps": 2
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "antigravity-sdk/1",
+   "adapter": {
+    "name": "antigravity-sdk-atif",
+    "version": "0.2.0"
+   }
+  }
+ }
+}

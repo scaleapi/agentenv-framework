@@ -1,7 +1,8 @@
-"""Antigravity's ATIF adapter on records made as the agent makes them: the SDK's chunks and hook results through the
-bridge's own TrajectoryRecorder, the native log, and the turn's model calls through its CallFeed and the relay's Calls,
-the ``calls`` aux file. Each case runs through the protocol's adapter kit, so the live rule holds after every record
-and the document validates as a producer's. Then the bridge and the server feeding them."""
+"""Antigravity's ATIF adapter on records made as the agent makes them: the SDK's chunks and hook results, in the shapes
+the recorded runs show (a tool call's id its step's, ``<trajectory>:<step index>``, a result's step id its trajectory's),
+through the bridge's own TrajectoryRecorder, the native log, and the turn's model calls through its CallFeed and the
+relay's Calls, the ``calls`` aux file. Each case runs through the protocol's adapter kit, so the live rule holds after
+every record and the document validates as a producer's. Then the bridge and the server feeding them."""
 
 from __future__ import annotations
 
@@ -27,6 +28,10 @@ AntigravityAtif = antigravity_atif.AntigravityAtif
 MODEL = "anthropic/claude-haiku-4-5"
 PROMPT = "Create hello.py that prints the sum of 1 to 100, run it, and reply with only the number."
 EPOCH = datetime(2026, 11, 27, 16, 0, tzinfo=timezone.utc)
+# The SDK's trajectory ids: the turn's conversation's, and a sub-agent's.
+CONV = "776149fe0db66d5ab57ac7d61f21b3ca"
+SUB = "576eae4cd9534c6b55bb8a6a5f78927d"
+TASK = "Create notes.txt holding the word forty-two, then report back."
 
 
 def png(width=4, height=3) -> bytes:
@@ -52,6 +57,14 @@ def turn_messages(prompt=PROMPT) -> list[dict]:
 
 def other_messages(task: str) -> list[dict]:
     return [{"role": "system", "content": "You are a subagent."}, {"role": "user", "content": task}]
+
+
+def streamed(name, index, trajectory=CONV, args=None) -> ToolCall:
+    """A tool call as the SDK streams one, once its model call has ended: named for its step, with the arguments the
+    SDK reads off the step."""
+    step = f"{trajectory}:{index}"
+    return ToolCall(name=name, args=args if args is not None else {}, id=step, step_id=step, canonical_path=None,
+                    server_name=None)
 
 
 def _drive(coroutine) -> bool:
@@ -114,9 +127,9 @@ class Feed:
         self.recorder.hooked_call(ToolCall(id=call_id, name=name))
         return self
 
-    def result(self, call_id, name, result):
-        self.recorder.result({"kind": "tool_result", **antigravity_bridge._plain(
-            ToolResult(id=call_id, name=name, result=result))})
+    def result(self, call_id, name, result, trajectory=CONV):
+        self.recorder.result({"kind": "tool_result", **antigravity_bridge._plain(ToolResult(
+            name=name, id=call_id, step_id=f"{trajectory}:99", result=result, error=None, server_name=None))})
         return self
 
     def failed(self, call_id, name, error):
@@ -124,11 +137,16 @@ class Feed:
                               "error": error})
         return self
 
-    def tool(self, call_id, stream_id, name, result, step_index=0, args=None):
+    def tool(self, call_id, name, index, result, trajectory=CONV, args=None):
         """A call the hooks decide, streamed, then its result."""
-        self.hooked(call_id, name).chunk(ToolCall(id=stream_id, name=name, step_index=step_index,
-                                                  args=args or {"CommandLine": "python3 hello.py"}))
-        return self.result(call_id, name, result)
+        self.hooked(call_id, name).chunk(streamed(name, index, trajectory,
+                                                  {"command_line": "python3 hello.py"} if args is None else args))
+        return self.result(call_id, name, result, trajectory)
+
+    def native(self, record):
+        """A native record fed as an older bridge wrote it."""
+        self.records.append(Fed(record))
+        return self
 
     def close(self):
         self.recorder.close()
@@ -157,6 +175,11 @@ def every_step(document):
                                     for step in agent_steps(sub)]
 
 
+def model_steps(trajectory):
+    """A trajectory's steps of the relay's calls, not the closing reply the SDK adds."""
+    return [step for step in agent_steps(trajectory) if "model_name" in step]
+
+
 def results(step) -> dict:
     return {result["source_call_id"]: result for result in (step.get("observation") or {}).get("results") or ()}
 
@@ -164,13 +187,13 @@ def results(step) -> dict:
 def test_a_call_is_one_step_with_its_thought_text_and_calls_and_the_relays_model_time_and_usage():
     feed = Feed(effort="high")
     first = feed.request()
-    feed.chunk(Thought(step_index=0, text="I'll write the script, then run it."))
-    feed.chunk(Text(step_index=0, text="Let me ")).chunk(Text(step_index=0, text="write it."))
+    feed.chunk(Thought(step_index=1, text="I'll write the script, then run it."))
+    feed.chunk(Text(step_index=1, text="Let me ")).chunk(Text(step_index=1, text="write it."))
     feed.end(first, counted=usage(1200, 40))
     ended = feed.records[-1].record["timestamp"]
-    feed.tool("toolu_1", "c:1", "run_command", "Created At: 2026-11-27T16:00:01Z\nOutput:\n5050")
+    feed.tool("toolu_1", "run_command", 2, "Created At: 2026-11-27T16:00:01Z\nOutput:\n5050")
     second = feed.request()
-    feed.chunk(Text(step_index=2, text="5050")).end(second, counted=usage(1300, 4, cached=1200)).close()
+    feed.end(second, counted=usage(1300, 4, cached=1200)).chunk(Text(step_index=3, text="5050")).close()
     kit = run(feed)
     one, two = agent_steps(kit.document)
 
@@ -178,53 +201,85 @@ def test_a_call_is_one_step_with_its_thought_text_and_calls_and_the_relays_model
     assert one["reasoning_content"] == "I'll write the script, then run it."
     assert profile_of(one)["reasoning"] == [{"chars": 35, "visibility": "summary"}]
     assert one["message"] == "Let me write it."
-    assert one["tool_calls"] == [{"tool_call_id": "c:1", "function_name": "run_command",
-                                  "arguments": {"CommandLine": "python3 hello.py"}}]
-    assert results(one)["c:1"]["content"] == "Created At: 2026-11-27T16:00:01Z\nOutput:\n5050"
+    assert one["tool_calls"] == [{"tool_call_id": f"{CONV}:2", "function_name": "run_command",
+                                  "arguments": {"command_line": "python3 hello.py"}}]
+    assert results(one)[f"{CONV}:2"]["content"] == "Created At: 2026-11-27T16:00:01Z\nOutput:\n5050"
     assert one["metrics"] == {"prompt_tokens": 1200, "cached_tokens": 0, "completion_tokens": 40}
     assert (two["message"], two["metrics"]["cached_tokens"]) == ("5050", 1200)
     assert kit.document["final_metrics"]["total_prompt_tokens"] == feed.calls.usage(1).input_tokens == 2500
 
 
-def test_what_streams_after_a_calls_end_and_before_the_next_request_is_that_calls():
-    feed = Feed()
-    first = feed.request()
-    feed.end(first, counted=usage(900, 30)).chunk(Text(step_index=0, text="Checking."))
-    feed.tool("toolu_1", "c:1", "view_file", "hello")
-    feed.answered().chunk(Text(step_index=1, text="hello")).close()
-    one, two = agent_steps(run(feed).document)
+def test_a_calls_text_the_bridge_flushes_after_the_next_request_is_still_that_calls():
+    """The recorded shape: the bridge holds a text until the next chunk, which comes once the harness has asked again,
+    as when a sub-agent's message comes in after the answer."""
+    feed = Feed().answered(counted=usage(900, 30)).tool("toolu_1", "run_command", 1, "forty-two")
+    feed.answered(counted=usage(1000, 3))
+    third = feed.request()
+    feed.chunk(Text(step_index=2, text="forty-two\n")).chunk(Text(step_index=4, text="forty-two"))
+    feed.end(third, counted=usage(1100, 2)).close()
+    steps = model_steps(run(feed).document)
 
-    assert (one["message"], one["metrics"]["prompt_tokens"], [c["tool_call_id"] for c in one["tool_calls"]]) == (
-        "Checking.", 900, ["c:1"])
-    assert two["message"] == "hello"
+    assert [(step["message"], step["metrics"]["prompt_tokens"]) for step in steps] == [
+        ("", 900), ("forty-two", 1000), ("forty-two", 1100)]
 
 
-def test_a_chunk_of_the_open_steps_index_streamed_after_the_next_request_stays_in_its_step():
-    """The SDK's stream can trail the relay: the call's text, which the recorder holds until its tool call, arrives
-    once the harness has asked for the next response."""
-    feed = Feed()
-    first = feed.request()
-    feed.chunk(Thought(step_index=0, text="Run it.")).chunk(Text(step_index=0, text="Running it."))
-    feed.end(first, counted=usage(900, 30))
+def test_a_thought_the_bridge_flushes_while_the_next_call_is_in_flight_is_that_calls():
+    """A response's thought is held until its text begins, while the call still streams."""
+    feed = Feed().answered(counted=usage(900, 30)).tool("toolu_1", "run_command", 1, "5050")
     second = feed.request()
-    feed.tool("toolu_1", "c:1", "run_command", "5050")
-    feed.chunk(Text(step_index=2, text="5050")).end(second, counted=usage(1000, 3)).close()
+    feed.chunk(Thought(step_index=2, text="It printed 5050.")).chunk(Text(step_index=2, text="5050"))
+    feed.end(second, counted=usage(1000, 3)).close()
     one, two = agent_steps(run(feed).document)
 
-    assert (one["message"], one["tool_calls"][0]["tool_call_id"]) == ("Running it.", "c:1")
-    assert (two["message"], two["metrics"]["prompt_tokens"]) == ("5050", 1000)
+    assert ("reasoning_content" in one, one["tool_calls"][0]["tool_call_id"]) == (False, f"{CONV}:1")
+    assert (two["reasoning_content"], two["message"], two["metrics"]["prompt_tokens"]) == ("It printed 5050.", "5050",
+                                                                                          1000)
+
+
+def test_a_thought_the_bridge_flushes_while_its_call_is_in_flight_is_that_calls_after_a_call_that_streamed_nothing():
+    """The coding recording's first call streamed nothing: the next call's thought, held until its text begins, is
+    still the call in flight's, not the ended one's."""
+    feed = Feed().answered(counted=usage(900, 30))
+    second = feed.request()
+    feed.chunk(Thought(step_index=2, text="Write it first.")).chunk(Text(step_index=2, text="Writing hello.py."))
+    feed.end(second, counted=usage(1000, 40)).tool("toolu_1", "run_command", 3, "5050")
+    feed.answered(counted=usage(1100, 3)).chunk(Text(step_index=4, text="5050")).close()
+    one, two, three = agent_steps(run(feed).document)
+
+    assert (one["message"], "reasoning_content" in one, one["metrics"]["prompt_tokens"]) == ("", False, 900)
+    assert (two["reasoning_content"], two["message"], two["tool_calls"][0]["tool_call_id"]) == (
+        "Write it first.", "Writing hello.py.", f"{CONV}:3")
+    assert three["message"] == "5050"
+
+
+def test_a_calls_text_the_bridge_writes_once_the_next_call_ended_is_still_that_calls():
+    """The recorded shape of the turn waiting on a sub-agent, one chunk later: a text-only call's thought, then its
+    text, which the bridge holds until the next chunk, comes once the turn's next call has ended too."""
+    feed = Feed().answered(counted=usage(1000, 20)).tool("toolu_1", "invoke_subagent", 1, "started", args={})
+    feed.answered(other_messages(TASK), usage(400, 10)).chunk(Text(step_index=1, text="Creating notes.txt."))
+    waiting = feed.request()
+    feed.chunk(Thought(step_index=2, text="Wait for it.")).end(waiting, counted=usage(1100, 5))
+    feed.chunk(Text(step_index=2, text="Waiting for the sub-agent."))
+    feed.answered(counted=usage(1200, 5)).tool("toolu_2", "run_command", 3, "forty-two")
+    feed.answered(counted=usage(1300, 2)).chunk(Text(step_index=4, text="forty-two")).close()
+    steps = model_steps(run(feed).document)
+
+    assert [(step.get("reasoning_content"), step["message"], step["metrics"]["prompt_tokens"]) for step in steps] == [
+        (None, "", 1000), ("Wait for it.", "Waiting for the sub-agent.", 1100), (None, "", 1200),
+        (None, "forty-two", 1300)]
+    assert steps[2]["tool_calls"][0]["tool_call_id"] == f"{CONV}:3"
 
 
 def test_a_refused_call_is_a_step_with_no_model_call_holding_its_error_before_its_retry():
     feed = Feed()
     first = feed.request()
-    feed.chunk(Text(step_index=0, text="Running it.")).end(first, counted=usage(900, 30))
+    feed.end(first, counted=usage(900, 30)).chunk(Text(step_index=1, text="Running it."))
+    feed.tool("toolu_1", "run_command", 2, "5050")
     feed.end(feed.request(), status=503)
-    feed.tool("toolu_1", "c:1", "run_command", "5050")
-    feed.answered(counted=usage(1000, 3)).chunk(Text(step_index=2, text="5050")).close()
+    feed.answered(counted=usage(1000, 3)).chunk(Text(step_index=3, text="5050")).close()
     one, refused, retried = agent_steps(run(feed).document)
 
-    assert one["tool_calls"][0]["tool_call_id"] == "c:1" and one["message"] == "Running it."
+    assert one["tool_calls"][0]["tool_call_id"] == f"{CONV}:2" and one["message"] == "Running it."
     assert (refused["llm_call_count"], refused["model_name"], "metrics" in refused) == (0, MODEL, False)
     assert profile_of(refused)["error"] == {"kind": "infra_error",
                                             "message": "the endpoint refused the call (HTTP 503)"}
@@ -245,7 +300,7 @@ def test_a_call_the_relay_refused_holds_the_relays_reason_and_a_turn_failed_ther
 def test_a_call_answered_without_usage_is_a_step_with_its_model_and_no_counts_so_no_totals():
     feed = Feed()
     first = feed.request()
-    feed.chunk(Text(step_index=0, text="ok")).end(first).close()
+    feed.end(first).chunk(Text(step_index=1, text="ok")).close()
     kit = run(feed)
     (step,) = agent_steps(kit.document)
 
@@ -263,11 +318,11 @@ def test_a_call_answered_without_usage_is_a_step_with_its_model_and_no_counts_so
 def test_an_image_a_tool_returns_is_a_media_file_named_by_its_bytes(returned):
     image = png()
     feed = Feed().answered()
-    feed.tool("toolu_1", "c:1", "browser_take_screenshot", returned(base64.b64encode(image).decode()))
+    feed.tool("toolu_1", "browser_take_screenshot", 1, returned(base64.b64encode(image).decode()))
     feed.answered().chunk(Text(step_index=2, text="Example Domain")).close()
     kit = run(feed)
 
-    result = results(agent_steps(kit.document)[0])["c:1"]
+    result = results(agent_steps(kit.document)[0])[f"{CONV}:1"]
     text, picture = result["content"]
     assert text == {"type": "text", "text": "### Result"} and kit.media[picture["source"]["path"]] == image
     assert profile_of(result)["media"][picture["source"]["path"]]["width"] == 4
@@ -275,44 +330,78 @@ def test_an_image_a_tool_returns_is_a_media_file_named_by_its_bytes(returned):
 
 def test_a_failed_tool_call_is_its_result_with_the_error_and_a_result_whose_call_never_streamed_is_its_own_call():
     feed = Feed().answered()
-    feed.hooked("toolu_1", "run_command").chunk(ToolCall(id="c:1", name="run_command", step_index=0))
+    feed.hooked("toolu_1", "run_command").chunk(streamed("run_command", 1))
     feed.failed("toolu_1", "run_command", "exit status 1")
     feed.result("toolu_9", "peer_agents_send", "the reviewer says yes")
     feed.answered().chunk(Text(step_index=2, text="done")).close()
     step = agent_steps(run(feed).document)[0]
 
     assert [(call["tool_call_id"], call["function_name"]) for call in step["tool_calls"]] == [
-        ("c:1", "run_command"), ("toolu_9", "peer_agents_send")]
-    assert (results(step)["c:1"]["content"], profile_of(results(step)["c:1"])["status"]) == ("exit status 1", "error")
+        (f"{CONV}:1", "run_command"), ("toolu_9", "peer_agents_send")]
+    assert (results(step)[f"{CONV}:1"]["content"], profile_of(results(step)[f"{CONV}:1"])["status"]) == (
+        "exit status 1", "error")
     assert results(step)["toolu_9"]["content"] == "the reviewer says yes"
 
 
-def test_a_sub_agent_is_embedded_under_the_invoke_subagent_call_that_spawned_it_with_its_calls_usage():
+def test_a_file_the_sdk_streams_as_edit_file_takes_the_create_file_result_the_bridge_left_unbound_in_its_trajectory():
+    """An older bridge bound a result by name alone, and the SDK names a created file's step edit_file and its hook's
+    call create_file: the result came unbound at the turn's end, its step id naming its trajectory."""
+    feed = Feed().answered()
+    feed.chunk(streamed("edit_file", 1, args={"file_path": "/app/hello.py"}))
+    feed.answered().chunk(Text(step_index=2, text="5050")).close()
+    feed.native({"kind": "tool_result", "name": "create_file", "id": "toolu_1", "step_id": f"{CONV}:4",
+                 "result": "Create hello.py", "error": None, "server_name": None, "call_ref": None})
+    one, two = agent_steps(run(feed).document)
+
+    assert [call["function_name"] for call in one["tool_calls"]] == ["edit_file"] and "tool_calls" not in two
+    assert results(one)[f"{CONV}:1"]["content"] == "Create hello.py"
+
+
+def test_a_sub_agent_that_runs_on_after_its_spawn_returned_is_embedded_with_its_calls_and_what_it_streamed():
+    """The recorded shape: invoke_subagent returns at once, the sub-agent's calls run beside the turn's, its tool calls
+    name its own trajectory, and the turn's answer and its last text come while the turn's next call is in flight."""
     feed = Feed().answered(counted=usage(1000, 20))
-    feed.hooked("toolu_1", "invoke_subagent")
-    feed.chunk(ToolCall(id="c:1", name="invoke_subagent", step_index=0, args={"Task": "List the files in /app."}))
-    feed.answered(other_messages("List the files in /app."), usage(400, 10))
-    feed.answered(other_messages("List the files in /app."), usage(450, 12))
-    feed.result("toolu_1", "invoke_subagent", "hello.py")
-    feed.answered(counted=usage(1100, 5)).chunk(Text(step_index=2, text="hello.py")).close()
+    feed.tool("toolu_1", "invoke_subagent", 1, "Subagent File Creation", args={})
+    root = feed.request()
+    sub = feed.request(other_messages(TASK))
+    feed.end(root, counted=usage(1100, 10)).tool("toolu_2", "run_command", 2, "cat: notes.txt: No such file")
+    root = feed.request()
+    feed.end(sub, counted=usage(400, 10))
+    feed.hooked("toolu_3", "create_file").chunk(streamed("edit_file", 1, SUB, {"file_path": "/app/notes.txt"}))
+    sub = feed.request(other_messages(TASK))
+    feed.end(root, counted=usage(1200, 10)).tool("toolu_4", "run_command", 3, "forty-two")
+    feed.result("toolu_3", "create_file", "File creation", SUB)
+    root = feed.request()
+    feed.end(sub, counted=usage(450, 12))
+    sub = feed.request(other_messages(TASK))
+    feed.end(root, counted=usage(1300, 2))
+    root = feed.request()
+    feed.chunk(Text(step_index=4, text="forty-two"))
+    feed.chunk(Text(step_index=3, text="Task complete: notes.txt holds forty-two."))
+    feed.end(sub, counted=usage(500, 8))
+    feed.chunk(Text(step_index=6, text="forty-two")).end(root, counted=usage(1400, 2)).close()
     kit = run(feed)
     document = kit.document
 
-    (sub,) = document["subagent_trajectories"]
-    spawn = results(agent_steps(document)[0])["c:1"]
-    assert spawn["subagent_trajectory_ref"] == [{"trajectory_id": sub["trajectory_id"]}]
-    assert [step["metrics"]["prompt_tokens"] for step in agent_steps(sub)] == [400, 450]
-    assert sub["agent"]["model_name"] == MODEL
-    assert document["final_metrics"]["total_prompt_tokens"] == feed.calls.usage(1).input_tokens == 2950
+    (trajectory,) = document["subagent_trajectories"]
+    spawn = results(agent_steps(document)[0])[f"{CONV}:1"]
+    assert spawn["subagent_trajectory_ref"] == [{"trajectory_id": trajectory["trajectory_id"]}]
+    subs = agent_steps(trajectory)
+    assert [step["metrics"]["prompt_tokens"] for step in subs] == [400, 450, 500]
+    assert [call["tool_call_id"] for call in subs[0]["tool_calls"]] == [f"{SUB}:1"]
+    assert results(subs[0])[f"{SUB}:1"]["content"] == "File creation"
+    assert subs[2]["message"] == "Task complete: notes.txt holds forty-two."
+    assert [(step["message"], step["metrics"]["prompt_tokens"]) for step in model_steps(document)] == [
+        ("", 1000), ("", 1100), ("", 1200), ("forty-two", 1300), ("forty-two", 1400)]
+    assert document["final_metrics"]["total_prompt_tokens"] == feed.calls.usage(1).input_tokens == 7350
 
 
 def test_a_sub_agent_given_the_users_words_is_a_sub_agent_and_the_turns_conversation_compacted_stays_the_turns():
     quoted = other_messages(f"The user asked: {PROMPT} Write hello.py for them.")
     compacted = [{"role": "user", "content": f"Summary of the work so far.\n\n{PROMPT}"}]
     feed = Feed().answered(counted=usage(1000, 20))
-    feed.hooked("toolu_1", "invoke_subagent").chunk(ToolCall(id="c:1", name="invoke_subagent", step_index=0))
+    feed.tool("toolu_1", "invoke_subagent", 1, "started", args={})
     feed.answered(quoted, usage(400, 10))
-    feed.result("toolu_1", "invoke_subagent", "written")
     feed.answered(compacted, usage(300, 5)).chunk(Text(step_index=2, text="5050")).close()
     document = run(feed).document
 
@@ -322,11 +411,62 @@ def test_a_sub_agent_given_the_users_words_is_a_sub_agent_and_the_turns_conversa
         ("", 1000), ("5050", 300)]
 
 
+def test_every_call_of_a_sub_agent_given_the_users_words_is_its_own_and_the_turns_calls_stay_the_turns():
+    """Its later calls hold the turn's message too, while no sub-agent waits for a first call: its claimed conversation
+    keeps them its own, not the turn's conversation compacted."""
+    quoted = other_messages(f"The user asked: {PROMPT} Write hello.py for them.")
+    feed = Feed().answered(counted=usage(1000, 20)).tool("toolu_1", "invoke_subagent", 1, "started", args={})
+    feed.answered(quoted, usage(400, 10)).answered(quoted, usage(410, 10))
+    feed.answered(counted=usage(1100, 5)).answered(quoted, usage(420, 10))
+    feed.answered(counted=usage(1200, 5)).chunk(Text(step_index=3, text="5050")).close()
+    document = run(feed).document
+
+    (sub,) = document["subagent_trajectories"]
+    assert [step["metrics"]["prompt_tokens"] for step in agent_steps(sub)] == [400, 410, 420]
+    assert [(step["message"], step["metrics"]["prompt_tokens"]) for step in agent_steps(document)] == [
+        ("", 1000), ("", 1100), ("5050", 1200)]
+
+
+def test_a_steps_text_the_bridge_writes_as_two_records_another_trajectorys_text_between_is_that_steps():
+    """The bridge joins a step's text until another chunk comes: the sub-agent's answer, the turn's text between its
+    parts, is two records of one step, both the sub-agent's."""
+    feed = Feed().answered(counted=usage(1000, 20)).tool("toolu_1", "invoke_subagent", 1, "started", args={})
+    sub, root = feed.request(other_messages(TASK)), feed.request()
+    feed.chunk(Text(step_index=1, text="Task ")).chunk(Text(step_index=2, text="Waiting."))
+    feed.chunk(Text(step_index=1, text="complete.")).end(sub, counted=usage(400, 10))
+    feed.end(root, counted=usage(1100, 5)).close()
+    document = run(feed).document
+
+    (sub_step,) = agent_steps(document["subagent_trajectories"][0])
+    assert (sub_step["message"], sub_step["metrics"]["prompt_tokens"]) == ("Task complete.", 400)
+    assert [(step["message"], step["metrics"]["prompt_tokens"]) for step in model_steps(document)] == [
+        ("", 1000), ("Waiting.", 1100)]
+
+
+def test_the_turns_thought_its_tool_call_flushes_once_its_call_ended_is_its_beside_a_sub_agent_streaming_nothing_yet():
+    """Each trajectory counts its step indices up from its start: the step after the turn's latest is the turn's next,
+    not the first of a sub-agent in flight that has streamed nothing; and the sub-agent's own first thought stays its
+    own."""
+    feed = Feed().answered(counted=usage(1000, 20)).tool("toolu_1", "invoke_subagent", 1, "started", args={})
+    sub, root = feed.request(other_messages(TASK)), feed.request()
+    feed.chunk(Thought(step_index=2, text="Check the file.")).end(root, counted=usage(1100, 5))
+    feed.tool("toolu_2", "run_command", 2, "cat: notes.txt: No such file")
+    feed.chunk(Thought(step_index=1, text="Create notes.txt.")).chunk(Text(step_index=1, text="Creating it."))
+    feed.end(sub, counted=usage(400, 10)).answered(counted=usage(1200, 5)).close()
+    document = run(feed).document
+
+    (sub_step,) = agent_steps(document["subagent_trajectories"][0])
+    assert (sub_step["reasoning_content"], sub_step["message"]) == ("Create notes.txt.", "Creating it.")
+    one, two, three = model_steps(document)
+    assert (two["reasoning_content"], two["tool_calls"][0]["tool_call_id"], two["metrics"]["prompt_tokens"]) == (
+        "Check the file.", f"{CONV}:2", 1100)
+
+
 def test_a_sub_agents_calls_before_its_spawn_streamed_move_into_it():
     feed = Feed().answered()
     feed.hooked("toolu_1", "invoke_subagent")
     feed.answered(other_messages("Count the files."), usage(400, 10))
-    feed.chunk(ToolCall(id="c:1", name="invoke_subagent", step_index=0))
+    feed.chunk(streamed("invoke_subagent", 1))
     feed.answered(other_messages("Count the files."), usage(450, 12))
     feed.result("toolu_1", "invoke_subagent", "1")
     feed.answered().chunk(Text(step_index=2, text="1")).close()
@@ -337,13 +477,13 @@ def test_a_sub_agents_calls_before_its_spawn_streamed_move_into_it():
     assert len(agent_steps(document)) == 2
 
 
-def test_a_call_of_another_conversation_with_no_spawn_waiting_is_a_root_step_after_the_call_it_ran_during():
+def test_a_call_of_another_conversation_with_no_sub_agent_waiting_is_a_root_step_before_the_turns_next():
     feed = Feed()
     first = feed.request()
-    feed.chunk(Thought(step_index=0, text="Run it.")).chunk(Text(step_index=0, text="Running it."))
+    feed.chunk(Thought(step_index=1, text="Run it.")).chunk(Text(step_index=1, text="Running it."))
     feed.answered(other_messages("Write a title for this conversation."), usage(300, 6))
-    feed.end(first, counted=usage(900, 30)).tool("toolu_1", "c:1", "run_command", "5050")
-    feed.answered(counted=usage(1000, 3)).chunk(Text(step_index=2, text="5050")).close()
+    feed.end(first, counted=usage(900, 30)).tool("toolu_1", "run_command", 2, "5050")
+    feed.answered(counted=usage(1000, 3)).chunk(Text(step_index=3, text="5050")).close()
     steps = agent_steps(run(feed).document)
 
     assert [(step["message"], step["metrics"]["prompt_tokens"]) for step in steps] == [
@@ -351,18 +491,19 @@ def test_a_call_of_another_conversation_with_no_spawn_waiting_is_a_root_step_aft
 
 
 def test_each_task_of_a_resumed_conversation_writes_its_own_steps_its_streams_ids_kept_unique():
-    first = Feed().answered().tool("toolu_1", "c:1", "run_command", "5050")
+    first = Feed().answered().tool("toolu_1", "run_command", 1, "5050")
     first.answered().chunk(Text(step_index=2, text="5050")).close()
     prompt = "Now sum 1 to 1000 instead."
     second = Feed(prompt=prompt)
     second.answered(turn_messages(PROMPT) + turn_messages(prompt)[1:])
-    second.tool("toolu_2", "c:1", "run_command", "500500")
-    second.answered(turn_messages(PROMPT) + turn_messages(prompt)[1:]).chunk(Text(step_index=2, text="500500"))
+    second.tool("toolu_2", "run_command", 1, "500500")
+    second.answered(turn_messages(PROMPT) + turn_messages(prompt)[1:]).chunk(Text(step_index=4, text="500500"))
     kit = run(first, second.close())
     steps = agent_steps(kit.document)
 
     assert [step["message"] for step in steps] == ["", "5050", "", "500500"]
-    assert [call["tool_call_id"] for step in steps for call in step.get("tool_calls") or ()] == ["c:1", "c:1#2"]
+    assert [call["tool_call_id"] for step in steps for call in step.get("tool_calls") or ()] == [
+        f"{CONV}:1", f"{CONV}:1#2"]
     assert [step["source"] for step in kit.document["steps"]].count("user") == 2
 
 
@@ -378,63 +519,82 @@ def test_a_turn_cut_at_its_time_keeps_the_results_its_hooks_gave_and_the_call_th
 
 
 def test_from_atif_gives_the_sdks_chunks_and_results_back():
-    feed = Feed().answered().chunk(Text(step_index=0, text="Running it."))
-    feed.tool("toolu_1", "c:1", "run_command", "5050")
-    feed.answered().chunk(Text(step_index=2, text="5050")).close()
+    feed = Feed().answered().chunk(Text(step_index=1, text="Running it."))
+    feed.tool("toolu_1", "run_command", 2, "5050")
+    feed.answered().chunk(Text(step_index=3, text="5050")).close()
     log = AntigravityAtif.from_atif(strip_profile(run(feed).document)).log
 
     assert [record.get("type") or record["kind"] for record in log] == ["Text", "ToolCall", "tool_result", "Text"]
-    assert log[2] == {"kind": "tool_result", "id": "c:1", "name": "run_command", "result": "5050", "call_ref": "c:1"}
+    assert log[2] == {"kind": "tool_result", "id": f"{CONV}:2", "name": "run_command", "result": "5050",
+                      "call_ref": f"{CONV}:2"}
 
 
 def seeded_session(seed: int) -> tuple[list[Feed], dict]:
-    """A random conversation of one to three tasks: calls of thoughts, text streamed before or after the call ends,
-    and tool calls with results, some failed, some images, some spawning a sub-agent; refused attempts before some
-    calls, calls answered without usage, calls of other conversations between; the stream ids starting again each
-    task. With what the copy must hold."""
+    """A random conversation of one to three tasks, in the order the recorded runs show: calls of thoughts and text,
+    held by the bridge until the next chunk, and tool calls streamed once their call has ended, with results, some
+    failed, some images, some files the SDK streams as edit_file, some spawning a sub-agent that runs its calls of its
+    own trajectory and ends on a text; refused attempts before some calls, calls answered without usage, calls of other
+    conversations between. With what the copy must hold: a task's answer only where no sub-agent ran, since the SDK
+    names no trajectory for a text, and one held behind a call of the turn's that ended after can be either's."""
     rng = random.Random(seed)
     image = base64.b64encode(png()).decode()
-    want = {"calls": 0, "refused": 0, "tools": 0}
+    want = {"calls": 0, "refused": 0, "tools": 0, "subagents": [], "answers": []}
     feeds = []
     ids = iter(range(10**6))
+    index = iter(range(1, 10**6))
     for _ in range(rng.randint(1, 3)):
-        feed, stream = Feed(), iter(range(1, 10**6))
+        feed, answer, spawned = Feed(), "", False
         count = rng.randint(1, 4)
-        for index in range(count):
-            last = index == count - 1
+        for call_index in range(count):
+            last = call_index == count - 1
             while rng.random() < 0.2:
                 feed.end(feed.request(), status=rng.choice([429, 500, 503]))
                 want["calls"] += 1
                 want["refused"] += 1
             call = feed.request()
             want["calls"] += 1
-            if rng.random() < 0.5:
-                feed.chunk(Thought(step_index=2 * index, text="Plan the next step."))
+            step = next(index)
             text = rng.choice(["5050", "It printed 42."]) if last else rng.choice(["", "", "Running it."])
-            early = rng.random() < 0.5
-            if text and early:
-                feed.chunk(Text(step_index=2 * index, text=text))
+            live = rng.random() < 0.5
+            if rng.random() < 0.5:
+                feed.chunk(Thought(step_index=step, text="Plan the next step."))
+            if text and live:
+                feed.chunk(Text(step_index=step, text=text))
             feed.end(call, counted=None if rng.random() < 0.1 else usage(rng.randint(500, 9000), rng.randint(1, 90)))
-            if text and not early:
-                feed.chunk(Text(step_index=2 * index, text=text))
+            if text and not live:
+                feed.chunk(Text(step_index=step, text=text))
+            answer = text if last else answer
             for _ in range(0 if last else rng.choice([1, 1, 2])):
-                name = rng.choice(["run_command", "view_file", "browser_take_screenshot", "invoke_subagent"])
-                call_id, stream_id = f"toolu_{next(ids)}", f"c:{next(stream)}"
-                feed.hooked(call_id, name).chunk(ToolCall(id=stream_id, name=name, step_index=2 * index))
-                if name == "invoke_subagent":
-                    task = f"Subtask {next(ids)}."
-                    for _ in range(rng.randint(1, 2)):
-                        feed.answered(other_messages(task), usage(rng.randint(100, 900), rng.randint(1, 20)))
-                        want["calls"] += 1
+                name = rng.choice(["run_command", "view_file", "browser_take_screenshot", "create_file",
+                                   "invoke_subagent"])
+                call_id = f"toolu_{next(ids)}"
+                feed.hooked(call_id, name).chunk(streamed("edit_file" if name == "create_file" else name, next(index)))
                 if rng.random() < 0.2:
                     feed.failed(call_id, name, "exit status 1")
                 else:
                     feed.result(call_id, name, [{"type": "image", "data": image, "mimeType": "image/png"}]
                                 if name == "browser_take_screenshot" else "ok")
                 want["tools"] += 1
+                if name == "invoke_subagent":
+                    spawned = True
+                    task, trajectory, sub_index = f"Subtask {next(ids)}.", f"sub{next(ids)}", iter(range(1, 10**6))
+                    calls = rng.randint(1, 3)
+                    for sub_call in range(calls):
+                        feed.answered(other_messages(task), usage(rng.randint(100, 900), rng.randint(1, 20)))
+                        if sub_call < calls - 1:
+                            sub_id = f"toolu_{next(ids)}"
+                            feed.hooked(sub_id, "run_command").chunk(streamed("run_command", next(sub_index),
+                                                                              trajectory))
+                            feed.result(sub_id, "run_command", "ok", trajectory)
+                            want["tools"] += 1
+                        else:
+                            feed.chunk(Text(step_index=next(sub_index), text="Subtask done."))
+                    want["calls"] += calls
+                    want["subagents"].append(calls)
             if not last and rng.random() < 0.2:
                 feed.answered(other_messages("Write a title for this conversation."), usage(300, 6))
                 want["calls"] += 1
+        want["answers"].append(None if spawned else answer)
         feeds.append(feed.close())
     return feeds, want
 
@@ -446,21 +606,70 @@ def test_a_seeded_conversations_copy_holds_every_call_the_relay_forwarded_and_ev
     steps = every_step(document)
     turns = [feed.calls.usage(0) for feed in feeds]
 
-    assert len(steps) == want["calls"]
+    assert len([step for step in steps if "model_name" in step]) == want["calls"]
     for count, total in (("prompt_tokens", "input_tokens"), ("completion_tokens", "output_tokens")):
         assert sum(step.get("metrics", {}).get(count, 0) for step in steps) == sum(
             getattr(turn, total) or 0 for turn in turns)
-    assert [step for step in steps if step["llm_call_count"] == 0] == [
-        step for step in steps if "error" in profile_of(step)]
-    assert sum(1 for step in steps if step["llm_call_count"] == 0) == want["refused"]
+    refused = [step for step in steps if "model_name" in step and step["llm_call_count"] == 0]
+    assert refused == [step for step in steps if "error" in profile_of(step)] and len(refused) == want["refused"]
     calls = [call["tool_call_id"] for step in steps for call in step.get("tool_calls") or ()]
     assert len(calls) == want["tools"] and set(calls) == {key for step in steps for key in results(step)}
+    subs = document.get("subagent_trajectories") or ()
+    assert [len(agent_steps(sub)) for sub in subs] == want["subagents"]
+    assert all(call["tool_call_id"].startswith("sub") for sub in subs for step in agent_steps(sub)
+               for call in step.get("tool_calls") or ())
+    assert sum(step["message"].count("Subtask done.") for step in steps if "model_name" in step) == len(subs)
+    tasks: list[list[dict]] = []
+    for step in document["steps"]:
+        tasks.append([]) if step["source"] == "user" else tasks[-1].append(step)
+    assert [next(step["message"] for step in reversed(task) if step.get("llm_call_count") == 1)
+            for task, answer in zip(tasks, want["answers"]) if answer is not None] == [
+        answer for answer in want["answers"] if answer is not None]
 
 
 def test_the_tested_sdk_is_the_one_the_image_pins():
     pinned = [line.split("==", 1)[1] for line in (AGENT_DIR / "requirements.txt").read_text().splitlines()
               if line.startswith("google-antigravity==")]
     assert antigravity_atif.TESTED_WITH == tuple(pinned) == (antigravity_bridge.SDK_VERSION,)
+
+
+def test_the_bridge_binds_a_create_file_result_to_the_edit_file_call_the_sdk_streamed():
+    events: list[dict] = []
+    recorder = antigravity_bridge.TrajectoryRecorder(events.append)
+    recorder.hooked_call(ToolCall(id="toolu_1", name="create_file"))
+    recorder.chunk(streamed("edit_file", 2, args={"file_path": "/app/hello.py"}))
+    recorder.result({"kind": "tool_result", "id": "toolu_1", "name": "create_file", "result": "Create hello.py"})
+    recorder.close()
+
+    assert [(event.get("type") or event["kind"], event.get("call_ref")) for event in events] == [
+        ("ToolCall", None), ("tool_result", f"{CONV}:2")]
+
+
+@pytest.mark.parametrize("sent, options", [
+    ({"stream": True}, {"include_usage": True}),
+    ({"stream": True, "stream_options": {"include_obfuscation": False}},
+     {"include_obfuscation": False, "include_usage": True}),
+    ({"stream": True, "stream_options": {"include_usage": True}}, {"include_usage": True}),
+    ({}, None),
+])
+def test_a_streamed_model_call_asks_for_its_usage_which_the_relay_counts_it_by(sent, options):
+    """The harness asks for none, and LiteLLM's stream then carries no usage: every call would be unreported."""
+    body = json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}], **sent}).encode()
+
+    rewritten = json.loads(asyncio.run(antigravity_bridge.turn_rewrite(None, [])(body)))
+
+    assert rewritten.get("stream_options") == options
+
+
+def test_a_model_call_the_endpoint_refuses_fails_the_turn_with_the_sdks_reason_as_an_infra_error():
+    """The SDK ends such a turn with its connection error, which isn't its execution error."""
+    reason = 'Agent execution terminated due to error. ("request failed (code 400): refused")'
+    fake_sdk.Agent.turns.append(Turn(steps=[("raise", fake_sdk.AntigravityConnectionError(reason))]))
+
+    result = _bridge()
+
+    assert (result.error_code, result.error, result.infra) == ("antigravity_error", reason, True)
+    assert result.usage is not None
 
 
 class Relay:
@@ -496,12 +705,12 @@ def forwarding(monkeypatch) -> Relay:
 def _turn(relay: Relay, prompt: str) -> Turn:
     return Turn(steps=[
         ("await", lambda: relay.forward(turn_messages(prompt), usage(1200, 40))),
-        ("chunk", Text(step_index=0, text="Let me run it.")),
+        ("chunk", Text(step_index=1, text="Let me run it.")),
         ("call", ToolCall(id="toolu_1", name="run_command")),
-        ("chunk", ToolCall(id="c:1", name="run_command", step_index=0)),
-        ("result", ToolResult(id="toolu_1", name="run_command", result="5050")),
+        ("chunk", streamed("run_command", 2)),
+        ("result", ToolResult(id="toolu_1", name="run_command", step_id=f"{CONV}:4", result="5050")),
         ("await", lambda: relay.forward(turn_messages(prompt), usage(1300, 4, cached=1200))),
-        ("chunk", Text(step_index=2, text="5050")),
+        ("chunk", Text(step_index=3, text="5050")),
     ])
 
 
@@ -591,8 +800,8 @@ async def test_a_task_that_builds_atif_is_fed_its_calls_and_serves_one_step_per_
     one, two = agent_steps(document)
     assert task["status"]["state"] == "completed"
     assert {entry["name"] for entry in read["aux"]} == {"calls"}
-    assert (one["message"], one["tool_calls"][0]["tool_call_id"], results(one)["c:1"]["content"]) == (
-        "Let me run it.", "c:1", "5050")
+    assert (one["message"], one["tool_calls"][0]["tool_call_id"], results(one)[f"{CONV}:2"]["content"]) == (
+        "Let me run it.", f"{CONV}:2", "5050")
     assert (two["message"], two["metrics"]["prompt_tokens"]) == ("5050", 1300)
     assert profile_of(document["steps"][-1])["state"] == "completed"
     assert document["final_metrics"]["total_prompt_tokens"] == 2500

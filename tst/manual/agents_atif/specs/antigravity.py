@@ -1,8 +1,9 @@
 """Antigravity's recording: the image's A2A server runs the pinned SDK, whose harness calls the model through the turn's
 relay over Chat Completions; its conversations, the env times and images its turns were given are under
 ``$ANTIGRAVITY_HOME``, ``/data/.antigravity`` in the image. Beside the common scenarios, a sub-agent the SDK's
-``invoke_subagent`` starts, and a high effort, which the relay sends as ``reasoning_effort``, for the SDK's Thought
-chunks."""
+``invoke_subagent`` starts, which runs on after the call returns, and a high effort, which the relay sends as
+``reasoning_effort``, for the SDK's Thought chunks; Gemini 2.5 Flash streamed none through the relay. The model is Gemini
+2.5 Flash since the harness asks for 65,535 output tokens, more than Claude Haiku 4.5 takes."""
 
 SPEC = {
     "image": "agentenv-antigravity",
