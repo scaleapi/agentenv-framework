@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import secrets
 import string
+from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Optional
 
@@ -43,6 +45,15 @@ def new_eval_instance_id(root_id: str) -> str:
     """A fresh id for a run of the eval ``root_id``, derived from it, as a task run's is, so the record keeps the eval's
     namespace."""
     return f"{root_id}-{''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))}"
+
+
+def utc_timestamp(value: str) -> str:
+    """``value``, an ISO 8601 time with its offset, in UTC to the microsecond, so that sorting the text sorts the
+    times whoever wrote them."""
+    when = datetime.fromisoformat(value)
+    if when.tzinfo is None:
+        raise ValueError(f"a time needs its UTC offset, got {value!r}")
+    return when.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
 def slot_id(task_id: str, task_version: int, replica: int) -> str:
@@ -168,6 +179,7 @@ class EvalInstance:
 
     def __post_init__(self) -> None:
         self.status = EvalInstanceStatus(self.status)
+        self.created_at = utc_timestamp(self.created_at)
 
     @property
     def eval_id(self) -> Optional[str]:
@@ -279,5 +291,7 @@ def planned_slots(eval_instance_id: str, tasks: list[tuple[str, int]], k: int) -
     """The slots of running each ``(task_id, task_version)`` ``k`` times: replicas 1 to ``k`` of every task."""
     if k < 1:
         raise ValueError(f"k counts the runs of each task and must be at least 1, got {k}")
+    if twice := sorted(f"{task_id}@{version}" for (task_id, version), n in Counter(tasks).items() if n > 1):
+        raise ValueError(f"each task is planned once at a version, so its slots don't collide: {', '.join(twice)}")
     return [Slot(eval_instance_id, task_id, task_version, replica)
             for replica in range(1, k + 1) for task_id, task_version in tasks]

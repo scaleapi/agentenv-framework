@@ -54,6 +54,9 @@ def slot_ids_name_the_task_version_and_replica_counted_from_one(root):
         slot_id(f"{root}/tasks/a", 2, 0)
     with pytest.raises(ValueError):
         planned_slots(instance.id, [(f"{root}/tasks/a", 2)], k=0)
+    with pytest.raises(ValueError):
+        planned_slots(instance.id, [(f"{root}/tasks/a", 2), (f"{root}/tasks/b", 1), (f"{root}/tasks/a", 2)], k=1)
+    assert len(planned_slots(instance.id, [(f"{root}/tasks/a", 2), (f"{root}/tasks/a", 3)], k=2)) == 4
 
 
 def an_attempt_is_added_after_the_earlier_ones_and_never_replaces_them(root):
@@ -148,11 +151,13 @@ def per_run_secrets_are_not_stored(root):
 
 def eval_instances_list_newest_first_and_by_eval(root):
     other_root = f"{root}-other"
-    made = [created_instance(root, created_at=f"2026-11-27T10:0{i}:00+00:00") for i in range(3)]
+    times = ["2026-11-27T10:00:00+00:00", "2026-11-27T05:01:00.5-05:00", "2026-11-27T10:02:00Z"]
+    made = [created_instance(root, created_at=when) for when in times]
     created_instance(other_root, created_at="2026-11-27T10:05:00+00:00")
 
     ours = instance_store.list_eval_instances(eval_id=root)
     assert [i.id for i in ours] == [i.id for i in reversed(made)]
+    assert made[1].created_at == "2026-11-27T10:01:00.500000+00:00"
     assert [i.id for i in instance_store.list_eval_instances(eval_id=root, limit=1, offset=1)] == [made[1].id]
     every = instance_store.list_eval_instances()
     assert [i.created_at for i in every] == sorted((i.created_at for i in every), reverse=True)
@@ -165,6 +170,9 @@ def an_unknown_status_or_slot_state_is_refused(root):
         Slot(f"{root}-x", f"{root}/tasks/a", 2, 1, state="passed")
     with pytest.raises(ValueError):
         EvalSource(kind="folder")
+    for when in ("2026-11-27T10:00:00", "yesterday"):
+        with pytest.raises(ValueError):
+            _instance(root, created_at=when)
     instance = created_instance(root)
     with pytest.raises(ValueError):
         instance_store.record_slot(instance.id, f"{root}/tasks/a@2#1", "passed")
