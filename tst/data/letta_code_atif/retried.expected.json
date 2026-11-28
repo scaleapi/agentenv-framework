@@ -1,0 +1,134 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-letta-code-retried",
+ "agent": {
+  "name": "Letta Code",
+  "version": "1.0.0",
+  "model_name": "openai/gpt-4.1-mini"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:55:42.445665Z",
+   "source": "user",
+   "message": "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-letta-code-retried",
+     "task_id": "ee9a2b93-86fd-47f4-b15f-8a33d891a439",
+     "message_id": "941d4ad9e64443b09219ae0034e1d0ae",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:55:47.320Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "call_urOMHZ9G2RlD1BsqbWRddidU",
+     "function_name": "Bash",
+     "arguments": {
+      "command": "echo first",
+      "description": "Echo first"
+     }
+    },
+    {
+     "tool_call_id": "call_H8H0osqNBJf8CADTULqqWKkD",
+     "function_name": "Bash",
+     "arguments": {
+      "command": "echo second",
+      "description": "Echo second"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "call_urOMHZ9G2RlD1BsqbWRddidU",
+      "content": "first\n"
+     },
+     {
+      "source_call_id": "call_H8H0osqNBJf8CADTULqqWKkD",
+      "content": "second\n"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 22855,
+    "cached_tokens": 22272,
+    "completion_tokens": 56
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:55:47.391Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "503: {\"message\":\"service unavailable\",\"code\":503}"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:55:48.403Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "503: {\"message\":\"service unavailable\",\"code\":503}"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-28T06:55:51.486Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "first second",
+   "metrics": {
+    "prompt_tokens": 22929,
+    "cached_tokens": 22784,
+    "completion_tokens": 3
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 45784,
+  "total_completion_tokens": 59,
+  "total_cached_tokens": 45056,
+  "total_steps": 5
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "letta-code-events/1",
+   "adapter": {
+    "name": "letta-code-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

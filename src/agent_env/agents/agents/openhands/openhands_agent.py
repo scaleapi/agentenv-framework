@@ -15,9 +15,10 @@ import tarfile
 import tempfile
 import threading
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final, Literal, Protocol, Self
 from urllib.parse import urlsplit
@@ -55,6 +56,8 @@ from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+
+from openhands_atif import OpenHandsAtif
 
 OPENHANDS_VERSION: Final[str] = "1.58.2"
 TRAJECTORY_FORMAT: Final[str] = "openhands-events/v1"
@@ -149,6 +152,8 @@ class Turn:
     on_event: Callable[[dict[str, Any]], None]
     # What a run that was cancelled had spent by then.
     on_usage: Callable[[Usage], None]
+    # The atif/1 adapter's aux records, only when the task builds a copy.
+    on_aux: Callable[[str, dict[str, Any]], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +196,115 @@ def _summed(calls: list[tuple[int, ...]], tool_calls: int, details: dict[str, An
     return Usage(tool_call_count=tool_calls, input_tokens=input_tokens, output_tokens=output_tokens,
                  total_tokens=input_tokens + output_tokens, cache_read_tokens=read, cache_write_tokens=write,
                  input_includes_cache=True if settled == len(calls) else None, provider_details=details)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class CallFeed:
+    """What a run feeds the task's atif/1 copy beside the SDK's events, when it builds one (``on_aux``): before each
+    event, the model calls the turn's LLMs got a response to since the last, read off their metrics and counted as
+    ``turn_usage`` counts them, so each call's step opens before its response's events and the steps sum to the
+    turn's usage; each failed attempt the SDK makes again, on the call whose response it refused when it recorded
+    one; the tools the model is offered; and the zone of the events' naive times. One lock keeps records and events
+    in order, as the SDK calls back from several threads."""
+
+    def __init__(self, on_event: Callable[[dict[str, Any]], None],
+                 on_aux: Callable[[str, dict[str, Any]], None] | None, *, model: str,
+                 now: Callable[[], datetime] = _utc_now) -> None:
+        self._on_event, self._on_aux = on_event, on_aux
+        self._model, self._now = model, now
+        self._lock = threading.Lock()
+        # Each metrics object's latencies, costs and token usages read so far, by id: the condenser's LLM may share
+        # the agent's.
+        self._read: dict[int, list[int]] = {}
+        #: The turn's LLMs, each with ``metrics``, ``reasoning_effort`` and ``uses_responses_api()``, once the run has
+        #: built them. Their effort is the one the SDK calls with: the task's, else the SDK's default.
+        self.llms: Sequence[Any] = ()
+
+    @property
+    def builds(self) -> bool:
+        return self._on_aux is not None
+
+    def event(self, event: dict[str, Any]) -> None:
+        with self._lock:
+            self._answered()
+            self._on_event(event)
+
+    def end(self) -> None:
+        """The calls answered since the last event, as the run ends."""
+        with self._lock:
+            self._answered()
+
+    def retried(self, attempt: int, retries: int, error: BaseException | None) -> None:
+        """The SDK's retry listener: attempt ``attempt`` of at most ``retries`` failed and is made again. A response
+        the SDK recorded and then refused, as one with no choices (``LLMNoResponseError``), is the attempt's own, so
+        its record holds the failure; an attempt with none is a failed call of its own."""
+        if self._on_aux is None:
+            return
+        failure: dict[str, Any] = {"attempt": attempt}
+        if error is not None:
+            failure.update(error_type=type(error).__name__, error=str(error) or type(error).__name__)
+        with self._lock:
+            if not self._answered(failure):
+                self._on_aux("llm_call", {"type": "llm_call", "outcome": "failed", "model": self._model,
+                                          "timestamp": self._stamp(), **failure})
+
+    def tools(self, definitions: Sequence[Mapping[str, Any]]) -> None:
+        self._aux("tools", {"type": "tools", "tools": list(definitions)})
+
+    def clock(self) -> None:
+        """The UTC offset of the local time the SDK stamps its events with, which names no zone."""
+        offset = datetime.now().astimezone().utcoffset()
+        self._aux("clock", {"type": "clock", "utc_offset_s": int(offset.total_seconds()) if offset else 0})
+
+    def _aux(self, name: str, record: dict[str, Any]) -> None:
+        if self._on_aux is not None:
+            with self._lock:
+                self._on_aux(name, record)
+
+    def _stamp(self) -> str:
+        return self._now().astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+    def _answered(self, failure: Mapping[str, Any] | None = None) -> int:
+        """One ``llm_call`` record per response latency not yet read: the SDK records one for every response, then
+        its cost when it has one, then its usage under the response's id when it came with any. A cost is the call's
+        only when every new response has one, since costs name no response. ``failure`` goes on the last: read as an
+        attempt fails, no event has followed it. The number of records."""
+        if self._on_aux is None:
+            return 0
+        records: list[dict[str, Any]] = []
+        for llm in self.llms:
+            metrics = llm.metrics
+            read = self._read.setdefault(id(metrics), [0, 0, 0])
+            latencies, costs, usages = (list(metrics.response_latencies), list(metrics.costs),
+                                        list(metrics.token_usages))
+            answered, priced = latencies[read[0]:], costs[read[1]:]
+            read[0], read[1] = len(latencies), len(costs)
+            for index, latency in enumerate(answered):
+                record: dict[str, Any] = {"type": "llm_call", "outcome": "unreported",
+                                          "response_id": latency.response_id, "model": self._model,
+                                          "timestamp": self._stamp(), "latency_s": latency.latency}
+                match = next((at for at in range(read[2], len(usages))
+                              if usages[at].response_id == latency.response_id), None)
+                if match is not None:
+                    read[2], usage = match + 1, usages[match]
+                    counted = _counted(usage.prompt_tokens, usage.completion_tokens, usage.cache_read_tokens,
+                                       usage.cache_write_tokens, True if llm.uses_responses_api() else None)
+                    record.update(outcome="answered", reasoning_tokens=usage.reasoning_tokens or 0,
+                                  **dict(zip(("input_tokens", "output_tokens", "cache_read_tokens",
+                                              "cache_write_tokens"), counted)))
+                if len(priced) == len(answered):
+                    record["cost_usd"] = priced[index].cost
+                if llm.reasoning_effort is not None:
+                    record["reasoning_effort"] = llm.reasoning_effort
+                records.append(record)
+        if failure and records:
+            records[-1].update(failure)
+        for record in records:
+            self._on_aux("llm_call", record)
+        return len(records)
 
 
 @dataclass(slots=True)
@@ -363,8 +477,8 @@ def _stage_conversation(archive: Path, conversations_dir: Path, target_id: str, 
     lifespan=_turns_stop_with_the_server,
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT,
-               description="The task's OpenHands SDK events, also while it runs."),
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT, atif=OpenHandsAtif,
+               description="The task's OpenHands SDK events, also while it runs; atif/1 when the run prescribes it."),
         enable(
             SNAPSHOT_V1,
             description=(
@@ -439,6 +553,17 @@ class OpenHandsAgent(AgentEnvAgent):
             with appending, suppress(RuntimeError):
                 request.trajectory.append(event)
 
+        def on_aux(name: str, record: dict[str, Any]) -> None:
+            with appending, suppress(RuntimeError):
+                request.trajectory.aux(name, record)
+
+        feeding = on_aux if request.trajectory.builds_atif else None
+
+        def cost_of(usage: Usage) -> None:
+            """The turn's cost as the atif/1 copy's, since its steps carry their own only where it's clear whose."""
+            if feeding is not None and usage.cost_usd is not None:
+                feeding("turn", {"type": "turn", "cost_usd": usage.cost_usd})
+
         conversation = conversation_id(request.context_id)
         # Bound before the run starts, so a live trajectory read or a mid-turn snapshot finds the conversation.
         self.set_session_ref_for_context(request.context_id, conversation)
@@ -464,11 +589,15 @@ class OpenHandsAgent(AgentEnvAgent):
                         endpoint=self.endpoint,
                         on_event=on_event,
                         on_usage=spent.append,
+                        on_aux=feeding,
                     ))
             except TimeoutError:
                 message = f"OpenHands did not finish within {config.timeout_seconds}s"
                 timed_out = TaskResult.builder().failed("openhands.timeout", message).add_text(message)
+                if spent:
+                    cost_of(spent[-1])
                 return (timed_out.usage(spent[-1]) if spent else timed_out).session_ref(conversation).build()
+        cost_of(outcome.usage)
         builder = TaskResult.builder().session_ref(conversation).usage(outcome.usage)
         if outcome.error_code is None:
             return builder.succeeded().add_text(outcome.text).build()

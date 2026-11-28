@@ -167,8 +167,13 @@ transcript, which `claude_bridge.SessionTail` feeds as aux records only while `r
 `gemini_atif.py`, from its session transcript (`gemini_transcript.SessionTail`) and the proxy's call records. Each
 bridge follows its tail with `tail_follow.following` (`utils/tail_follow`, which its image takes in `shared_sources.toml`
 and copies beside the bridge): read while the CLI runs and once more after it exits, a read in flight when the run ends
-fed rather than dropped. A runtime
-that only has a record at the end returns it with `native_trajectory(...)`: `agents/pi/pi_agent.py` `_result`.
+fed rather than dropped. Letta Code's, OpenCode's and Antigravity's adapters take each model call from the turn's model
+relay instead, which their bridges build with `Calls(sink=...)` (`utils/model_relay`) and feed as `calls` aux: every
+call the CLI makes, its side calls', sub-agents' and refused ones' included, with its model, counts and times. The
+in-process runtimes feed what their SDK holds: pydantic-ai's its hooks' delegated runs and failed calls, OpenHands' its
+LLMs' per-call metrics, browser-use's the turn's run, pruned screenshots and compaction summaries; pi's and Hermes' build
+from native alone, Hermes' plugin recording what each call returned whole. A runtime that only has a record at the end
+appends it then, with `live=False`: `agents/browser-use/a2a_server.py`.
 
 ### `skill-config/v1`, `/ext/skill-config`
 

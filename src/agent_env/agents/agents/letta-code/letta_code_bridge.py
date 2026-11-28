@@ -22,10 +22,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agentenv_protocol.a2a_agent import Usage
+from agentenv_protocol.a2a_agent.clock import follows
+from agentenv_protocol.computer.clock import session_time
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
 from agent_egress import clock_armed, egress_env
-from model_relay import Calls, model_relay
+from model_relay import Calls, model_relay, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,8 @@ _CLI_TIMEOUT_S = 120
 _TURN_MARKER = "AGENTENV_LETTA_TURN"
 # Where the processes are listed, each with its environment and command line.
 _PROC = Path("/proc")
+# Where a context's local backend keeps each conversation's transcript, a sub-agent's too, one JSON entry a line.
+_CONVERSATIONS = ".letta/lc-local-backend/conversations"
 
 
 def _base_url(environ: Mapping[str, str]) -> str:
@@ -418,14 +422,19 @@ async def run_letta_code(
     output_format: dict | None = None, timeout_s: int = 600, project_id: str | None = None,
     task_id: str | None = None, role: str | None = None, attachment_paths: list[str] | None = None,
     effort: str | None = None, event_callback: Callable[[dict], None] | None = None, workspace: str = "/app",
+    aux_callback: Callable[[str, dict], None] | None = None,
 ) -> LettaCodeResult:
     """A bounded CLI turn, including provider setup; cancellation kills the process tree. Its usage is what its model
-    relay counted: every model call the CLI and the processes it started made, its subagents' and summaries' too."""
-    calls = Calls()
+    relay counted: every model call the CLI and the processes it started made, its subagents' and summaries' too. With
+    ``aux_callback``, each of those calls is fed to it as it ends, the atif/1 adapter's ``calls`` aux record, and once
+    the turn's processes are stopped, what its sub-agents wrote to their transcripts (``subagents``)."""
+    calls = Calls() if aux_callback is None else Calls(sink=lambda record: aux_callback("calls", record),
+                                                      clock=_session_now if follows() else utc_now)
     try:
         async with asyncio.timeout(timeout_s):
             result = await _turn(prompt, context_id, session_id, model, mcp_servers, system_prompt, output_format,
-                                 project_id, task_id, role, attachment_paths, effort, event_callback, workspace, calls)
+                                 project_id, task_id, role, attachment_paths, effort, event_callback, workspace, calls,
+                                 aux_callback)
     except TimeoutError:
         result = LettaCodeResult(response="", tool_call_count=0, session_id=session_id,
                                  error=f"Letta Code timed out after {timeout_s}s")
@@ -436,8 +445,41 @@ async def run_letta_code(
     return result
 
 
+def _session_now() -> datetime:
+    """The time the CLI's own records carry, the env's while the image follows its clock, as the SDK stamps the atif/1
+    steps it writes: the relay's server stays on real time."""
+    return datetime.fromtimestamp(session_time(), timezone.utc)
+
+
+def _transcripts(home: Path) -> dict[Path, int]:
+    """Each conversation transcript in the context's local backend, with its size."""
+    return {path: path.stat().st_size for path in (home / _CONVERSATIONS).glob("*/messages.jsonl")}
+
+
+def _feed_subagents(home: Path, agent_id: str, before: Mapping[Path, int],
+                    aux_callback: Callable[[str, dict], None]) -> None:
+    """Feed the entries agents other than the context's own, its sub-agents, wrote to their transcripts after
+    ``before``'s sizes, each with its agent's id, as the ``subagents`` aux file: a sub-agent runs as a CLI of its own,
+    whose output never reaches the turn's stdout, and writes its conversation to the context's store."""
+    for path in sorted((home / _CONVERSATIONS).glob("*/messages.jsonl")):
+        try:
+            owner = json.loads((path.parent / "conversation.json").read_text()).get("agent_id")
+            written = path.read_bytes()[before.get(path, 0):]
+        except (OSError, ValueError):
+            continue
+        if not isinstance(owner, str) or owner == agent_id:
+            continue
+        for line in written.splitlines():
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict):
+                aux_callback("subagents", {**entry, "agent_id": owner})
+
+
 async def _turn(prompt, context_id, session_id, model, mcp_servers, system_prompt, output_format,
-                project_id, task_id, role, attachment_paths, effort, event_callback, workspace, calls):
+                project_id, task_id, role, attachment_paths, effort, event_callback, workspace, calls, aux_callback):
     model = model or DEFAULT_MODEL
     handle = "openai-compatible/" + model
     env = _context_env(context_id, [info["url"] for info in (mcp_servers or {}).values()], armed=clock_armed())
@@ -450,6 +492,7 @@ async def _turn(prompt, context_id, session_id, model, mcp_servers, system_promp
     headers = {"authorization": "Bearer " + os.environ.get("LITELLM_API_KEY", ""),
                **provider_headers(os.environ, _attribution_headers(project_id, task_id))}
     async with model_relay(_base_url(os.environ).removesuffix("/v1"), calls, headers=headers, models=[model]) as relay:
+        transcripts: dict[Path, int] | None = None
         try:
             await _command(env, "connect", "openai-compatible", "--base-url", relay + "/v1", "--api-key", "relay")
             agent_file = home / "agent-id.json"
@@ -479,6 +522,8 @@ async def _turn(prompt, context_id, session_id, model, mcp_servers, system_promp
             if effort:
                 target = ["--conversation", session_id] if session_id else ["--agent", agent_id]
                 await _command(env, "model", "set", handle, "--reasoning", effort, *target)
+            if aux_callback is not None:
+                transcripts = _transcripts(home)
             proc = await _started(asyncio.create_subprocess_exec(
                 *cmd, cwd=workspace, env=env, stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True,
@@ -505,6 +550,8 @@ async def _turn(prompt, context_id, session_id, model, mcp_servers, system_promp
         finally:
             if stopped := _stop_leftovers(env[_TURN_MARKER]):
                 logger.info(f"stopped {len(stopped)} Letta Code processes the turn left running")
+            if transcripts is not None:
+                _feed_subagents(home, agent_id, transcripts, aux_callback)
 
 
 # How much of the CLI's stdout one read takes; a line may span several reads.

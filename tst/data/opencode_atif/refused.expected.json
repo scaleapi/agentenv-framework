@@ -1,0 +1,84 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-opencode-refused",
+ "agent": {
+  "name": "OpenCode",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:54:46.739897Z",
+   "source": "user",
+   "message": "Reply with ok.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-opencode-refused",
+     "task_id": "e5703d12-1bc6-45b7-91ff-9adb9faa09e5",
+     "message_id": "c63e25bc89774f4eaaa0844eedf7c375",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:54:48.338Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "the endpoint refused the call (HTTP 400)",
+      "code": "400"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:54:48.740Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "APIError: refused by the recording proxy",
+      "code": "400"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:54:48.950005Z",
+   "source": "agent",
+   "message": "APIError: refused by the recording proxy",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "state": "failed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_steps": 4
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "opencode-events/1",
+   "adapter": {
+    "name": "opencode-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

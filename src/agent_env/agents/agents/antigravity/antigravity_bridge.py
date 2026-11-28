@@ -22,6 +22,7 @@ import mimetypes
 import os
 import threading
 from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,8 +36,10 @@ from google.antigravity.hooks import policy as ag_policy
 
 from agent_egress import clock_armed, egress_env
 from agentenv_protocol.a2a_agent import BuiltinTools, Usage
+from agentenv_protocol.a2a_agent.clock import follows
+from agentenv_protocol.computer.clock import session_time
 from antigravity_date import Records, Tracked, env_time_rewrite, message_digest
-from model_relay import Calls, model_relay
+from model_relay import Calls, Refusal, model_relay, stamp, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +67,11 @@ CONVERSATION_RECORDS = Records(SAVE_DIR / "conversation-records.json")
 IMAGES_DIR = SAVE_DIR / "images"
 # The characters of a value the SDK can't serialize that the trajectory keeps.
 _REPR_CHARS = 2000
+# The characters of the turn's prompt, whitespace collapsed, by which a model call's request is known to hold it.
+_PROMPT_HEAD_CHARS = 200
+# The model call the relay is forwarding in this task, as CallFeed numbered it: the relay rewrites a call's request and
+# hands its sink the call's record in the one task that forwards it.
+_FORWARDING: ContextVar[dict[str, Any] | None] = ContextVar("antigravity_forwarding", default=None)
 
 # MCP calls into a large env can be slow; the SDK's own read timeout is shorter than a first tools/list there takes.
 _MCP_TIMEOUT_S = 60.0
@@ -82,6 +90,8 @@ AntigravityTool = Literal["list_directory", "search_directory", "find_file", "vi
                           "schedule"]
 _ALWAYS_OFF = (agt.BuiltinTools.ASK_QUESTION, agt.BuiltinTools.GENERATE_IMAGE)
 _ALWAYS_ON = (agt.BuiltinTools.FINISH,)
+# A file the model creates streams as an edit_file step, while the SDK's hooks name the call create_file.
+_FILE_WRITES = frozenset({"create_file", "edit_file"})
 
 
 @dataclass
@@ -267,8 +277,9 @@ def _text_of(message: dict) -> str:
 def turn_rewrite(effort: str | None, images: list[str], times: Records | Tracked | None = None,
                  turn_images: Records | Tracked | None = None) -> Callable[[bytes], Awaitable[bytes]]:
     """The relay's rewrite for a turn's model calls: its messages' images, the env's time (``antigravity_date``), then
-    the turn's reasoning effort, which the SDK takes no setting for. ``times`` and ``turn_images`` are the records it
-    reads and writes, ``ENV_TIMES`` and ``TURN_IMAGES`` by default."""
+    the turn's reasoning effort, which the SDK takes no setting for, and, on a streamed call, the usage chunk the
+    harness never asks for, without which the relay counts no call's usage. ``times`` and ``turn_images`` are the
+    records it reads and writes, ``ENV_TIMES`` and ``TURN_IMAGES`` by default."""
     turn_images = TURN_IMAGES if turn_images is None else turn_images
     date_rewrite = env_time_rewrite(ENV_TIMES if times is None else times)
     reasoning = _EFFORTS.get(effort or "")
@@ -283,18 +294,83 @@ def turn_rewrite(effort: str | None, images: list[str], times: Records | Tracked
         if isinstance(request, dict) and _with_images(request, images, turn_images):
             body = json.dumps(request, separators=(",", ":")).encode()
         body = await date_rewrite(body)
-        if reasoning is None:
-            return body
         try:
             request = json.loads(body)
         except ValueError:
             return body
-        if not isinstance(request, dict) or request.get("reasoning_effort") == reasoning:
+        if not isinstance(request, dict):
             return body
-        request["reasoning_effort"] = reasoning
-        return json.dumps(request, separators=(",", ":")).encode()
+        changed = reasoning is not None and request.get("reasoning_effort") != reasoning
+        if changed:
+            request["reasoning_effort"] = reasoning
+        options = request.get("stream_options") or {}
+        if request.get("stream") is True and not options.get("include_usage"):
+            request["stream_options"], changed = {**options, "include_usage": True}, True
+        return json.dumps(request, separators=(",", ":")).encode() if changed else body
 
     return rewrite
+
+
+def session_now() -> datetime:
+    return datetime.fromtimestamp(session_time(), timezone.utc)
+
+
+class CallFeed:
+    """A turn's model calls as its atif/1 adapter's ``calls`` aux records, which the SDK's chunks carry nothing of: each
+    request as the relay forwards it (``agentenv.model_request``: its number in the turn, the conversation its first
+    user message keys, whether it holds the turn's own message, its model and effort), then the relay's record of the
+    call as it ends, with its number and any refusal of the rewrite's. Both are stamped on the clock the SDK writes the
+    copy's own steps on, the session's, which is the env's while the image follows it."""
+
+    def __init__(self, aux: Callable[[str, dict], None], prompt: str, effort: str | None) -> None:
+        self._aux = aux
+        self._head = " ".join(prompt.split())[:_PROMPT_HEAD_CHARS]
+        self._effort = effort
+        self._seq = 0
+        self._forwarding: set[int] = set()
+        self.clock: Callable[[], datetime] = session_now if follows() else utc_now
+
+    def rewrite(self, rewrite: Callable[[bytes], Awaitable[bytes]]) -> Callable[[bytes], Awaitable[bytes]]:
+        """``rewrite``, feeding each request it's handed before the relay forwards it."""
+
+        async def described(body: bytes) -> bytes:
+            self._seq += 1
+            call = {"seq": self._seq}
+            _FORWARDING.set(call)
+            self._forwarding.add(self._seq)
+            record = {"type": "agentenv.model_request", "via": "relay", "seq": self._seq, **self._described(body)}
+            try:
+                return await rewrite(body)
+            except Exception as exc:
+                call["refusal"] = str(exc) if isinstance(exc, Refusal) else f"model relay: {type(exc).__name__}: {exc}"
+                raise
+            finally:
+                self._aux("calls", {**record, "started": stamp(self.clock())})
+
+        return described
+
+    def sink(self, record: dict[str, Any]) -> None:
+        """The relay's record of a call, with the number its request was fed under; none for a call it forwarded no
+        request of."""
+        call = _FORWARDING.get()
+        if call is not None and call["seq"] in self._forwarding:
+            self._forwarding.discard(call["seq"])
+            record = {**record, **call}
+        self._aux("calls", record)
+
+    def _described(self, body: bytes) -> dict[str, Any]:
+        try:
+            request = json.loads(body)
+        except ValueError:
+            request = None
+        request = request if isinstance(request, dict) else {}
+        users = [_text_of(message) for message in request.get("messages") or []
+                 if isinstance(message, dict) and message.get("role") == "user"]
+        model, effort = request.get("model"), self._effort or request.get("reasoning_effort")
+        return {"conversation": message_digest(users[0]) if users else None,
+                "turn": any(self._head in " ".join(text.split()) for text in users),
+                **({"model": model} if isinstance(model, str) and model else {}),
+                **({"reasoning_effort": effort} if isinstance(effort, str) and effort else {})}
 
 
 class TrajectoryRecorder:
@@ -304,7 +380,8 @@ class TrajectoryRecorder:
     by the model's id and the stream by a step's, so a call the SDK lets its hooks decide binds to the next streamed
     call of its name, which the SDK streams once the hook allows it; a result waits for its call to stream. The
     harness's own tools, such as its skill lookup, stream and give their result to the hooks undecided: such a result
-    is tied to the earliest of those calls not yet tied to one."""
+    is tied to the earliest of those calls not yet tied to one. A file the model creates streams as ``edit_file`` while
+    its hooks name it ``create_file``, so either name binds the other."""
 
     def __init__(self, emit: Callable[[dict], None]) -> None:
         self._emit = emit
@@ -336,8 +413,8 @@ class TrajectoryRecorder:
             self.tool_calls += 1
             self.segments.append([])
             streamed = record.get("id")
-            decided = next((index for index, (_, name) in enumerate(self._deciding) if name == record.get("name")),
-                           None)
+            decided = next((index for index, (_, name) in enumerate(self._deciding)
+                            if _same_tool(name, record.get("name"))), None)
             if decided is None:
                 self._undecided.append(streamed)
                 return
@@ -385,14 +462,20 @@ class TrajectoryRecorder:
         return ""
 
 
+def _same_tool(name: Any, other: Any) -> bool:
+    return name == other or {name, other} <= _FILE_WRITES
+
+
 def _plain(value: Any) -> dict:
-    """A chunk or hook payload as JSON: pydantic's dump, with what it can't serialize as text."""
+    """A chunk or hook payload as JSON: pydantic's dump, or, when it can't write one as JSON, each field JSON can't
+    hold as its text, the rest kept: an empty error stays null, not "None", which would read as the call's failure."""
     dump = getattr(value, "model_dump", None)
     if callable(dump):
         try:
             return json.loads(json.dumps(dump(mode="json", exclude={"exception"}), default=str))
         except Exception:  # noqa: BLE001 - a result's value may be anything
-            return {key: str(item) for key, item in dump(warnings=False).items() if key != "exception"}
+            return {key: item if item is None or isinstance(item, (str, int, float)) else str(item)
+                    for key, item in dump(warnings=False).items() if key != "exception"}
     return {"repr": str(value)[:_REPR_CHARS]}
 
 
@@ -421,23 +504,29 @@ def _hooks(recorder: TrajectoryRecorder) -> list:
 
 async def run_antigravity(prompt: str, *, model: str | None, project_id: str | None = None,
                           task_id: str | None = None, effort: str | None = None,
-                          attachment_paths: list[str] | None = None, **kwargs: Any) -> AntigravityResult:
+                          attachment_paths: list[str] | None = None,
+                          aux_callback: Callable[[str, dict], None] | None = None, **kwargs: Any) -> AntigravityResult:
     """Run one turn, its model calls through a relay of the turn's own that adds the endpoint's key and the run's
     attribution, counts every call the harness makes, its subagents' included, and tells the model the env's time on
-    an armed clock. The turn's usage is theirs, a call answered without usage counted as unreported."""
+    an armed clock. The turn's usage is theirs, a call answered without usage counted as unreported. With
+    ``aux_callback``, a task that builds an atif/1 copy, each call is fed to it too (``CallFeed``)."""
     _record_attribution(project_id, task_id)
     images = [path for path in attachment_paths or [] if is_image(path)]
     if attachment_paths:
         prompt = f"{prompt}\n\nAttached files, also on disk for your tools:\n" + "\n".join(
             f"- {path}" for path in attachment_paths)
-    calls = Calls()
     headers = endpoint_headers(os.environ, attribution_headers(project_id, task_id))
     times, turn_images = Tracked(ENV_TIMES), Tracked(TURN_IMAGES)
+    rewrite = turn_rewrite(effort, images, times, turn_images)
+    calls = Calls()
+    if aux_callback is not None:
+        feed = CallFeed(aux_callback, prompt, _EFFORTS.get(effort or ""))
+        calls, rewrite = Calls(sink=feed.sink, clock=feed.clock), feed.rewrite(rewrite)
     started: list[Any] = []
     result = None
     try:
         async with model_relay(_api_root(os.environ.get("LITELLM_BASE_URL") or ""), calls, headers=headers,
-                               rewrite=turn_rewrite(effort, images, times, turn_images)) as relay:
+                               rewrite=rewrite) as relay:
             result = await _turn(prompt, base_url=f"{relay}/v1", model=model or DEFAULT_MODEL, started=started,
                                  **kwargs)
     finally:
@@ -515,13 +604,15 @@ async def _turn(prompt: str, *, base_url: str, model: str, session_id: str | Non
         return AntigravityResult(session_id=_kept(started, session_id), tool_call_count=recorder.tool_calls,
                                  error_code="timeout",
                                  error=f"the turn ran past its {timeout_s} s")
-    except agt.AntigravityExecutionError as exc:
+    except (agt.AntigravityExecutionError, agt.AntigravityConnectionError) as exc:
         recorder.close()
         text = str(exc)[:ERROR_MESSAGE_LIMIT]
         # A task env's MCP server that fails its initialize fails the harness's start: the run's tools aren't there.
+        # The SDK ends a turn whose model call the endpoint refused (400, 401, 403) with its connection error.
         mcp = "mcp load failed" in text.lower()
         return AntigravityResult(session_id=_kept(started, session_id), tool_call_count=recorder.tool_calls, error=text,
-                                 error_code="mcp_load_failed" if mcp else "antigravity_error", infra=mcp)
+                                 error_code="mcp_load_failed" if mcp else "antigravity_error",
+                                 infra=mcp or isinstance(exc, agt.AntigravityConnectionError))
     recorder.close()
     result = AntigravityResult(response=recorder.response(), session_id=conversation_id or session_id,
                                tool_call_count=recorder.tool_calls)

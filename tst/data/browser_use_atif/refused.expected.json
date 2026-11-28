@@ -1,0 +1,72 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-browser-use-refused",
+ "agent": {
+  "name": "browser-use",
+  "version": "2.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:54:22.470228Z",
+   "source": "user",
+   "message": "Reply with ok.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-browser-use-refused",
+     "task_id": "552bed74-3217-40b2-98a3-d9a4269e1a4b",
+     "message_id": "7611597dc4df41cfb76036ef1329673f",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:54:25.152553Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "the endpoint refused the call (HTTP 400)"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:54:25.618633Z",
+   "source": "agent",
+   "message": "ModelRequestRejectedError: status_code: 400, model_name: anthropic/claude-haiku-4-5, body: {'error': {'message': 'refused by the recording proxy', 'code': 400}}",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "state": "failed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_cost_usd": 0.0,
+  "total_steps": 3,
+  "extra": {
+   "agentenv": {
+    "cost_source": "harness"
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "browser-use-messages/1",
+   "adapter": {
+    "name": "browser-use-messages-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

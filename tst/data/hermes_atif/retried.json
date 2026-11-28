@@ -1,0 +1,279 @@
+{
+ "scenario": "retried",
+ "cli": "(2026.9.24)",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-hermes-retried",
+    "task_id": "bd253468-fb88-4f02-acea-dce46ff860a6",
+    "message_id": "db10ad1a0c654bc69aef32acb82020b6",
+    "agent_name": "Hermes Agent",
+    "agent_version": "1.0.0",
+    "agent_model": "anthropic/claude-haiku-4-5",
+    "started_at": "2026-11-28T06:56:30.066553Z",
+    "inbound": [
+     "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
+    ],
+    "state": "completed",
+    "final": [
+     "first second"
+    ],
+    "ended_at": "2026-11-28T06:56:39.686168Z"
+   },
+   "native": [
+    {
+     "type": "on_session_start",
+     "timestamp": 1795848996366,
+     "session_id": "20261128_065635_fa731d",
+     "model": "anthropic/claude-haiku-4-5"
+    },
+    {
+     "type": "post_api_request",
+     "timestamp": 1795848997762,
+     "session_id": "20261128_065635_fa731d",
+     "turn_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e",
+     "api_request_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e:api:1",
+     "api_call_count": 1,
+     "model": "anthropic/claude-haiku-4-5",
+     "response_model": "claude-haiku-4-5-20251001",
+     "started_at": 1795848996.4352403,
+     "finish_reason": "tool_calls",
+     "response": {
+      "model": "claude-haiku-4-5-20251001",
+      "upstream_provider": null,
+      "finish_reason": "tool_calls",
+      "assistant_message": {
+       "role": "assistant",
+       "content": "",
+       "tool_calls": [
+        {
+         "id": "toolu_vrtx_01Hf4RLQYnpScEyk6dFNSHte",
+         "name": "terminal",
+         "arguments": "{\"command\": \"echo first\"}",
+         "provider_data": null
+        },
+        {
+         "id": "toolu_vrtx_01A6xX95PTNYakXdKwYuvL7h",
+         "name": "terminal",
+         "arguments": "{\"command\": \"echo second\"}",
+         "provider_data": null
+        }
+       ]
+      },
+      "usage": {
+       "input_tokens": 13045,
+       "output_tokens": 88,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 0,
+       "reasoning_tokens": 0,
+       "request_count": 1,
+       "prompt_tokens": 13045,
+       "total_tokens": 13133
+      }
+     },
+     "usage": {
+      "input_tokens": 13045,
+      "output_tokens": 88,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "request_count": 1,
+      "prompt_tokens": 13045,
+      "total_tokens": 13133
+     },
+     "message": {
+      "tool_calls": [
+       {
+        "id": "toolu_vrtx_01Hf4RLQYnpScEyk6dFNSHte",
+        "name": "terminal",
+        "arguments": "{\"command\": \"echo first\"}"
+       },
+       {
+        "id": "toolu_vrtx_01A6xX95PTNYakXdKwYuvL7h",
+        "name": "terminal",
+        "arguments": "{\"command\": \"echo second\"}"
+       }
+      ]
+     }
+    },
+    {
+     "type": "pre_tool_call",
+     "timestamp": 1795848997803,
+     "session_id": "20261128_065635_fa731d",
+     "turn_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e",
+     "api_request_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e:api:1",
+     "tool_call_id": "toolu_vrtx_01Hf4RLQYnpScEyk6dFNSHte",
+     "tool_name": "terminal",
+     "args": {
+      "command": "echo first"
+     }
+    },
+    {
+     "type": "post_tool_call",
+     "timestamp": 1795848997906,
+     "session_id": "20261128_065635_fa731d",
+     "turn_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e",
+     "api_request_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e:api:1",
+     "tool_call_id": "toolu_vrtx_01Hf4RLQYnpScEyk6dFNSHte",
+     "tool_name": "terminal",
+     "result": "{\"output\": \"first\", \"exit_code\": 0, \"error\": null}",
+     "status": "ok",
+     "duration_ms": 111
+    },
+    {
+     "type": "pre_tool_call",
+     "timestamp": 1795848997911,
+     "session_id": "20261128_065635_fa731d",
+     "turn_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e",
+     "api_request_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e:api:1",
+     "tool_call_id": "toolu_vrtx_01A6xX95PTNYakXdKwYuvL7h",
+     "tool_name": "terminal",
+     "args": {
+      "command": "echo second"
+     }
+    },
+    {
+     "type": "post_tool_call",
+     "timestamp": 1795848997941,
+     "session_id": "20261128_065635_fa731d",
+     "turn_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e",
+     "api_request_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e:api:1",
+     "tool_call_id": "toolu_vrtx_01A6xX95PTNYakXdKwYuvL7h",
+     "tool_name": "terminal",
+     "result": "{\"output\": \"second\", \"exit_code\": 0, \"error\": null}",
+     "status": "ok",
+     "duration_ms": 30
+    },
+    {
+     "type": "post_api_request",
+     "timestamp": 1795848998664,
+     "session_id": "20261128_065635_fa731d",
+     "turn_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e",
+     "api_request_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e:api:2",
+     "api_call_count": 2,
+     "model": "anthropic/claude-haiku-4-5",
+     "response_model": "claude-haiku-4-5",
+     "started_at": 1795848997.9470406,
+     "finish_reason": "stop",
+     "response": {
+      "model": "claude-haiku-4-5",
+      "upstream_provider": null,
+      "finish_reason": "stop",
+      "assistant_message": {
+       "role": "assistant",
+       "content": "first second",
+       "tool_calls": []
+      },
+      "usage": {
+       "input_tokens": 13228,
+       "output_tokens": 5,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 0,
+       "reasoning_tokens": 0,
+       "request_count": 1,
+       "prompt_tokens": 13228,
+       "total_tokens": 13233
+      }
+     },
+     "usage": {
+      "input_tokens": 13228,
+      "output_tokens": 5,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "request_count": 1,
+      "prompt_tokens": 13228,
+      "total_tokens": 13233
+     },
+     "message": {
+      "content": "first second"
+     }
+    },
+    {
+     "type": "post_llm_call",
+     "timestamp": 1795848998680,
+     "session_id": "20261128_065635_fa731d",
+     "turn_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e",
+     "assistant_response": "first second"
+    },
+    {
+     "type": "on_session_end",
+     "timestamp": 1795848998683,
+     "session_id": "20261128_065635_fa731d",
+     "turn_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e",
+     "completed": true,
+     "failed": false,
+     "interrupted": false,
+     "turn_exit_reason": "text_response(finish_reason=stop)"
+    },
+    {
+     "type": "post_auxiliary_call",
+     "timestamp": 1795848999412,
+     "session_id": "20261128_065635_fa731d",
+     "turn_id": "20261128_065635_fa731d:25045bd2-ba59-4e3c-9f67-62712c84c08f:61c1e06e",
+     "api_request_id": "aux-a4a36d9120794f7ebf8364dc8f848905",
+     "aux_task": "title_generation",
+     "model": "anthropic/claude-haiku-4-5",
+     "response_model": "claude-haiku-4-5-20251001",
+     "started_at": 1795848998.6824253,
+     "usage": {
+      "input_tokens": 425,
+      "output_tokens": 14,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "request_count": 1,
+      "prompt_tokens": 425,
+      "total_tokens": 439
+     },
+     "content": "{\"title\": \"Run echo commands and display outputs\"}"
+    }
+   ],
+   "aux": [
+    {
+     "name": "turn",
+     "record": {
+      "type": "start",
+      "effort": null
+     },
+     "after": 0
+    },
+    {
+     "name": "turn",
+     "record": {
+      "type": "end",
+      "cost_usd": null
+     },
+     "after": 10
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 26698,
+    "output_tokens": 107,
+    "total_tokens": 26805,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "anthropic/claude-haiku-4-5",
+      "calls": 3,
+      "input_tokens": 26698,
+      "output_tokens": 107,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "input_includes_cache": true
+     }
+    ],
+    "provider_details": {
+     "reasoning_tokens": 0,
+     "cost_status": "unknown",
+     "turn_exit_reason": "text_response(finish_reason=stop)",
+     "api_calls": 3
+    }
+   }
+  }
+ ]
+}

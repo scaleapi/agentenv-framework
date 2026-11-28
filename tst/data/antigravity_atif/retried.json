@@ -1,0 +1,225 @@
+{
+ "scenario": "retried",
+ "cli": "0.1.24",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-antigravity-retried",
+    "task_id": "7fb25213-0488-474c-b942-f95bf2059aa6",
+    "message_id": "57bd584d7c414e5aa2b5fb0456fed26f",
+    "agent_name": "Antigravity",
+    "agent_version": "1.0.0",
+    "agent_model": "gemini-2.5-flash",
+    "started_at": "2026-11-28T06:59:38.504104Z",
+    "inbound": [
+     "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
+    ],
+    "state": "completed",
+    "final": [
+     "first second"
+    ],
+    "ended_at": "2026-11-28T06:59:57.746409Z"
+   },
+   "native": [
+    {
+     "type": "ToolCall",
+     "name": "run_command",
+     "args": {
+      "command_line": "echo first",
+      "working_dir": "/app"
+     },
+     "id": "7f5b8ec5a4e0839e5f268232f98b2fa1:1",
+     "step_id": "7f5b8ec5a4e0839e5f268232f98b2fa1:1",
+     "canonical_path": null,
+     "server_name": null
+    },
+    {
+     "kind": "tool_result",
+     "name": "run_command",
+     "id": "call_4bf8251622644ef097a30ce1",
+     "step_id": "7f5b8ec5a4e0839e5f268232f98b2fa1:2",
+     "result": {
+      "output": "first\r\n"
+     },
+     "error": null,
+     "server_name": null,
+     "call_ref": "7f5b8ec5a4e0839e5f268232f98b2fa1:1"
+    },
+    {
+     "type": "ToolCall",
+     "name": "run_command",
+     "args": {
+      "command_line": "echo second",
+      "working_dir": "/app"
+     },
+     "id": "7f5b8ec5a4e0839e5f268232f98b2fa1:4",
+     "step_id": "7f5b8ec5a4e0839e5f268232f98b2fa1:4",
+     "canonical_path": null,
+     "server_name": null
+    },
+    {
+     "kind": "tool_result",
+     "name": "run_command",
+     "id": "call_3cd7093dd16e43c28ca116d2",
+     "step_id": "7f5b8ec5a4e0839e5f268232f98b2fa1:6",
+     "result": {
+      "output": "second\r\n"
+     },
+     "error": null,
+     "server_name": null,
+     "call_ref": "7f5b8ec5a4e0839e5f268232f98b2fa1:4"
+    },
+    {
+     "type": "Text",
+     "step_index": 5,
+     "text": "first second"
+    }
+   ],
+   "aux": [
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 1,
+      "conversation": "f06d4ef10d6da88d",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:38.638Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T06:59:38.638Z",
+      "timestamp": "2026-11-28T06:59:39.933Z",
+      "seq": 1
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 2,
+      "conversation": "f06d4ef10d6da88d",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:39.947Z"
+     },
+     "after": 2
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 503,
+      "outcome": "refused",
+      "started": "2026-11-28T06:59:39.946Z",
+      "timestamp": "2026-11-28T06:59:39.948Z",
+      "seq": 2
+     },
+     "after": 2
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 3,
+      "conversation": "f06d4ef10d6da88d",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:44.953Z"
+     },
+     "after": 2
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 503,
+      "outcome": "refused",
+      "started": "2026-11-28T06:59:44.953Z",
+      "timestamp": "2026-11-28T06:59:44.955Z",
+      "seq": 3
+     },
+     "after": 2
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 4,
+      "conversation": "f06d4ef10d6da88d",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:54.805Z"
+     },
+     "after": 2
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T06:59:54.804Z",
+      "timestamp": "2026-11-28T06:59:55.950Z",
+      "seq": 4
+     },
+     "after": 2
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 5,
+      "conversation": "f06d4ef10d6da88d",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:55.965Z"
+     },
+     "after": 4
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T06:59:55.964Z",
+      "timestamp": "2026-11-28T06:59:57.712Z",
+      "seq": 5
+     },
+     "after": 4
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "provider_details": {
+     "model_calls": 3,
+     "unreported_calls": 3
+    }
+   }
+  }
+ ]
+}

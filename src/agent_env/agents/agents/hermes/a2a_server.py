@@ -3,7 +3,8 @@
 Built on agentenv-protocol's `AgentEnvAgent`: the framework serves the Agent Card, the A2A task lifecycle and the
 SDK-owned extensions (agent-config, mcp-config, skill listing, task trajectories, peer agents). Each turn is one
 `hermes agentenv turn` in the context's own Hermes profile, whose hook events are appended to the framework's
-trajectory log as Hermes writes them. A context's first turn starts a Hermes session, which later turns resume.
+trajectory log as Hermes writes them, and feed the atif/1 copy `hermes_atif` builds when a run prescribes one. A
+context's first turn starts a Hermes session, which later turns resume.
 """
 from __future__ import annotations
 
@@ -64,6 +65,7 @@ from pydantic import Field, field_validator
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 
+from hermes_atif import AUX, HermesAtif
 from hermes_bridge import (
     ERROR_MESSAGE_LIMIT,
     HERMES_ROOT,
@@ -348,7 +350,8 @@ def _tar(*args: str) -> None:
     config=HermesConfig,
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT),
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT, atif=HermesAtif, description=(
+            "Retrieve a task's Hermes hook events, also while it runs; atif/1 when the run prescribes it.")),
         enable(ATTRIBUTION_PROBE_V1),
         # SDK default: Hermes reaches the task's other agents through the SDK's peer_agents MCP tools.
         PEER_AGENTS_V1,
@@ -369,7 +372,8 @@ class HermesAgent(DurableSessionRefs, AgentEnvAgent):
 
     async def run(self, request: TaskRequest[HermesConfig]) -> TaskResult:
         # The plugin's hook events, appended as Hermes writes them, are the turn's trajectory: readable while it runs,
-        # and its final record once it ends.
+        # and its final record once it ends. They feed the atif/1 copy too, with the effort and cost only this server
+        # knows, when the run prescribes one.
         request.trajectory.set_format(TRAJECTORY_FORMAT)
         prompt = "\n".join(part.text for part in request.parts if isinstance(part, TextPart) and part.text)
         context_id = request.context_id
@@ -394,6 +398,8 @@ class HermesAgent(DurableSessionRefs, AgentEnvAgent):
                             attachments.extend(await _materialize_and_render(part, request.task_id))
                 except FilePartMaterializeError as exc:
                     return TaskResult.failure("filepart_error", str(exc), error_type="infra_error")
+                if request.trajectory.builds_atif:
+                    request.trajectory.aux(AUX, {"type": "start", "effort": request.config.effort})
                 try:
                     result = await run_hermes(
                         prompt=_with_attachments(prompt, attachments),
@@ -422,6 +428,8 @@ class HermesAgent(DurableSessionRefs, AgentEnvAgent):
 
         parts = [TextPart(text=result.response or result.error or "")]
         usage = _usage(result)
+        if request.trajectory.builds_atif:
+            request.trajectory.aux(AUX, {"type": "end", "cost_usd": usage.cost_usd})
         if result.error:
             details = {"error_type": "cli_error", "error_message": result.error[:ERROR_MESSAGE_LIMIT]}
             if result.error_code:

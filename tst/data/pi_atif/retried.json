@@ -1,0 +1,1287 @@
+{
+ "scenario": "retried",
+ "cli": "1.1.0",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-pi-retried",
+    "task_id": "3d4f4076-eaea-4046-8985-ec4255cfe29e",
+    "message_id": "9d531c274fd34c459a2179857fd80022",
+    "agent_name": "pi",
+    "agent_version": "1.1.0",
+    "agent_model": "anthropic/claude-haiku-4-5",
+    "started_at": "2026-11-28T06:54:43.843503Z",
+    "inbound": [
+     "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
+    ],
+    "state": "completed",
+    "final": [
+     "Both outputs on one line: **first** **second**"
+    ],
+    "ended_at": "2026-11-28T06:54:51.703026Z"
+   },
+   "native": [
+    {
+     "type": "session",
+     "version": 3,
+     "id": "ctx-pi-retried",
+     "timestamp": "2026-11-28T06:54:44.067Z",
+     "cwd": "/workspace"
+    },
+    {
+     "type": "agent_start"
+    },
+    {
+     "type": "turn_start"
+    },
+    {
+     "type": "message_start",
+     "message": {
+      "role": "system",
+      "content": "",
+      "sections": {
+       "preamble": "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
+       "tools": "<tools>\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call\n- write: Create or overwrite files\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n</tools>",
+       "rules": "<rules>\n- Use bash for file operations like ls, rg, find\n- Use read to examine files instead of cat or sed.\n- You can inspect PI_* environment variables for current model and session details.\n- Use edit for precise changes (edits[].oldText must match exactly)\n- When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls\n- Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.\n- Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.\n- Use write only for new files or complete rewrites.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>",
+       "docs": "<docs>\nPi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/README.md\n- Additional docs: /opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/docs\n- Examples: /opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing\n- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)\n</docs>",
+       "cwd": "<cwd>\n/workspace\n</cwd>"
+      },
+      "timestamp": 1795848884115,
+      "toolsAdded": [
+       {
+        "name": "read",
+        "description": "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+        "parameters": {
+         "type": "object",
+         "required": [
+          "path"
+         ],
+         "properties": {
+          "path": {
+           "type": "string",
+           "description": "Path to the file to read (relative or absolute)"
+          },
+          "offset": {
+           "type": "number",
+           "description": "Line number to start reading from (1-indexed)"
+          },
+          "limit": {
+           "type": "number",
+           "description": "Maximum number of lines to read"
+          }
+         }
+        },
+        "constrainedSampling": {
+         "type": "json_schema",
+         "strict": "prefer"
+        }
+       },
+       {
+        "name": "bash",
+        "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
+        "parameters": {
+         "type": "object",
+         "required": [
+          "command"
+         ],
+         "properties": {
+          "command": {
+           "type": "string",
+           "description": "Shell command to execute"
+          },
+          "timeout": {
+           "type": "number",
+           "description": "Timeout in seconds (optional, no default timeout)"
+          }
+         }
+        },
+        "constrainedSampling": {
+         "type": "json_schema",
+         "strict": "prefer"
+        }
+       },
+       {
+        "name": "edit",
+        "description": "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
+        "parameters": {
+         "type": "object",
+         "required": [
+          "path",
+          "edits"
+         ],
+         "properties": {
+          "path": {
+           "type": "string",
+           "description": "Path to the file to edit (relative or absolute)"
+          },
+          "edits": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "required": [
+             "oldText",
+             "newText"
+            ],
+            "properties": {
+             "oldText": {
+              "type": "string",
+              "description": "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."
+             },
+             "newText": {
+              "type": "string",
+              "description": "Replacement text for this targeted edit."
+             }
+            }
+           },
+           "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead."
+          }
+         }
+        },
+        "constrainedSampling": {
+         "type": "json_schema",
+         "strict": "prefer"
+        }
+       },
+       {
+        "name": "write",
+        "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+        "parameters": {
+         "type": "object",
+         "required": [
+          "path",
+          "content"
+         ],
+         "properties": {
+          "path": {
+           "type": "string",
+           "description": "Path to the file to write (relative or absolute)"
+          },
+          "content": {
+           "type": "string",
+           "description": "Content to write to the file"
+          }
+         }
+        },
+        "constrainedSampling": {
+         "type": "json_schema",
+         "strict": "prefer"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "type": "message_end",
+     "message": {
+      "role": "system",
+      "content": "",
+      "sections": {
+       "preamble": "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
+       "tools": "<tools>\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call\n- write: Create or overwrite files\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n</tools>",
+       "rules": "<rules>\n- Use bash for file operations like ls, rg, find\n- Use read to examine files instead of cat or sed.\n- You can inspect PI_* environment variables for current model and session details.\n- Use edit for precise changes (edits[].oldText must match exactly)\n- When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls\n- Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.\n- Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.\n- Use write only for new files or complete rewrites.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>",
+       "docs": "<docs>\nPi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/README.md\n- Additional docs: /opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/docs\n- Examples: /opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing\n- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)\n</docs>",
+       "cwd": "<cwd>\n/workspace\n</cwd>"
+      },
+      "timestamp": 1795848884115,
+      "toolsAdded": [
+       {
+        "name": "read",
+        "description": "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+        "parameters": {
+         "type": "object",
+         "required": [
+          "path"
+         ],
+         "properties": {
+          "path": {
+           "type": "string",
+           "description": "Path to the file to read (relative or absolute)"
+          },
+          "offset": {
+           "type": "number",
+           "description": "Line number to start reading from (1-indexed)"
+          },
+          "limit": {
+           "type": "number",
+           "description": "Maximum number of lines to read"
+          }
+         }
+        },
+        "constrainedSampling": {
+         "type": "json_schema",
+         "strict": "prefer"
+        }
+       },
+       {
+        "name": "bash",
+        "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
+        "parameters": {
+         "type": "object",
+         "required": [
+          "command"
+         ],
+         "properties": {
+          "command": {
+           "type": "string",
+           "description": "Shell command to execute"
+          },
+          "timeout": {
+           "type": "number",
+           "description": "Timeout in seconds (optional, no default timeout)"
+          }
+         }
+        },
+        "constrainedSampling": {
+         "type": "json_schema",
+         "strict": "prefer"
+        }
+       },
+       {
+        "name": "edit",
+        "description": "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
+        "parameters": {
+         "type": "object",
+         "required": [
+          "path",
+          "edits"
+         ],
+         "properties": {
+          "path": {
+           "type": "string",
+           "description": "Path to the file to edit (relative or absolute)"
+          },
+          "edits": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "required": [
+             "oldText",
+             "newText"
+            ],
+            "properties": {
+             "oldText": {
+              "type": "string",
+              "description": "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."
+             },
+             "newText": {
+              "type": "string",
+              "description": "Replacement text for this targeted edit."
+             }
+            }
+           },
+           "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead."
+          }
+         }
+        },
+        "constrainedSampling": {
+         "type": "json_schema",
+         "strict": "prefer"
+        }
+       },
+       {
+        "name": "write",
+        "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+        "parameters": {
+         "type": "object",
+         "required": [
+          "path",
+          "content"
+         ],
+         "properties": {
+          "path": {
+           "type": "string",
+           "description": "Path to the file to write (relative or absolute)"
+          },
+          "content": {
+           "type": "string",
+           "description": "Content to write to the file"
+          }
+         }
+        },
+        "constrainedSampling": {
+         "type": "json_schema",
+         "strict": "prefer"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "type": "message_start",
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
+       }
+      ],
+      "timestamp": 1795848884114
+     }
+    },
+    {
+     "type": "message_end",
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
+       }
+      ],
+      "timestamp": 1795848884114
+     }
+    },
+    {
+     "type": "message_start",
+     "message": {
+      "role": "assistant",
+      "content": [],
+      "api": "openai-completions",
+      "provider": "agentenv",
+      "model": "anthropic/claude-haiku-4-5",
+      "usage": {
+       "input": 0,
+       "output": 0,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "totalTokens": 0,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "pending",
+      "timestamp": 1795848884138
+     }
+    },
+    {
+     "type": "message_end",
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "toolCall",
+        "id": "toolu_vrtx_01UYtgBh3WHVrBwfseWAnKBN",
+        "name": "bash",
+        "arguments": {
+         "command": "echo first"
+        }
+       },
+       {
+        "type": "toolCall",
+        "id": "toolu_vrtx_0135LAM8asbETcTRMGv2xBRA",
+        "name": "bash",
+        "arguments": {
+         "command": "echo second"
+        }
+       }
+      ],
+      "api": "openai-completions",
+      "provider": "agentenv",
+      "model": "anthropic/claude-haiku-4-5",
+      "usage": {
+       "input": 1961,
+       "output": 88,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "reasoning": 0,
+       "totalTokens": 2049,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "toolUse",
+      "timestamp": 1795848884138,
+      "responseId": "chatcmpl-76c7c76b",
+      "responseModel": "claude-haiku-4-5",
+      "rawStopReason": "tool_calls",
+      "durationMs": 914,
+      "thinkingLevel": "off"
+     }
+    },
+    {
+     "type": "tool_execution_start",
+     "toolCallId": "toolu_vrtx_01UYtgBh3WHVrBwfseWAnKBN",
+     "toolName": "bash",
+     "args": {
+      "command": "echo first"
+     }
+    },
+    {
+     "type": "tool_execution_start",
+     "toolCallId": "toolu_vrtx_0135LAM8asbETcTRMGv2xBRA",
+     "toolName": "bash",
+     "args": {
+      "command": "echo second"
+     }
+    },
+    {
+     "type": "tool_execution_end",
+     "toolCallId": "toolu_vrtx_01UYtgBh3WHVrBwfseWAnKBN",
+     "toolName": "bash",
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "first\n"
+       }
+      ],
+      "structuredContent": {
+       "output": "first\n",
+       "truncated": false,
+       "exit_code": 0,
+       "wall_time_seconds": 0
+      }
+     },
+     "isError": false,
+     "durationMs": 8
+    },
+    {
+     "type": "tool_execution_end",
+     "toolCallId": "toolu_vrtx_0135LAM8asbETcTRMGv2xBRA",
+     "toolName": "bash",
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "second\n"
+       }
+      ],
+      "structuredContent": {
+       "output": "second\n",
+       "truncated": false,
+       "exit_code": 0,
+       "wall_time_seconds": 0
+      }
+     },
+     "isError": false,
+     "durationMs": 8
+    },
+    {
+     "type": "message_start",
+     "message": {
+      "role": "toolResult",
+      "toolCallId": "toolu_vrtx_01UYtgBh3WHVrBwfseWAnKBN",
+      "toolName": "bash",
+      "content": [
+       {
+        "type": "text",
+        "text": "first\n"
+       }
+      ],
+      "isError": false,
+      "durationMs": 8,
+      "timestamp": 1795848885065
+     }
+    },
+    {
+     "type": "message_end",
+     "message": {
+      "role": "toolResult",
+      "toolCallId": "toolu_vrtx_01UYtgBh3WHVrBwfseWAnKBN",
+      "toolName": "bash",
+      "content": [
+       {
+        "type": "text",
+        "text": "first\n"
+       }
+      ],
+      "isError": false,
+      "durationMs": 8,
+      "timestamp": 1795848885065
+     }
+    },
+    {
+     "type": "message_start",
+     "message": {
+      "role": "toolResult",
+      "toolCallId": "toolu_vrtx_0135LAM8asbETcTRMGv2xBRA",
+      "toolName": "bash",
+      "content": [
+       {
+        "type": "text",
+        "text": "second\n"
+       }
+      ],
+      "isError": false,
+      "durationMs": 8,
+      "timestamp": 1795848885065
+     }
+    },
+    {
+     "type": "message_end",
+     "message": {
+      "role": "toolResult",
+      "toolCallId": "toolu_vrtx_0135LAM8asbETcTRMGv2xBRA",
+      "toolName": "bash",
+      "content": [
+       {
+        "type": "text",
+        "text": "second\n"
+       }
+      ],
+      "isError": false,
+      "durationMs": 8,
+      "timestamp": 1795848885065
+     }
+    },
+    {
+     "type": "turn_end",
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "toolCall",
+        "id": "toolu_vrtx_01UYtgBh3WHVrBwfseWAnKBN",
+        "name": "bash",
+        "arguments": {
+         "command": "echo first"
+        }
+       },
+       {
+        "type": "toolCall",
+        "id": "toolu_vrtx_0135LAM8asbETcTRMGv2xBRA",
+        "name": "bash",
+        "arguments": {
+         "command": "echo second"
+        }
+       }
+      ],
+      "api": "openai-completions",
+      "provider": "agentenv",
+      "model": "anthropic/claude-haiku-4-5",
+      "usage": {
+       "input": 1961,
+       "output": 88,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "reasoning": 0,
+       "totalTokens": 2049,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "toolUse",
+      "timestamp": 1795848884138,
+      "responseId": "chatcmpl-76c7c76b",
+      "responseModel": "claude-haiku-4-5",
+      "rawStopReason": "tool_calls",
+      "durationMs": 914,
+      "thinkingLevel": "off"
+     },
+     "toolResults": [
+      {
+       "role": "toolResult",
+       "toolCallId": "toolu_vrtx_01UYtgBh3WHVrBwfseWAnKBN",
+       "toolName": "bash",
+       "content": [
+        {
+         "type": "text",
+         "text": "first\n"
+        }
+       ],
+       "isError": false,
+       "durationMs": 8,
+       "timestamp": 1795848885065
+      },
+      {
+       "role": "toolResult",
+       "toolCallId": "toolu_vrtx_0135LAM8asbETcTRMGv2xBRA",
+       "toolName": "bash",
+       "content": [
+        {
+         "type": "text",
+         "text": "second\n"
+        }
+       ],
+       "isError": false,
+       "durationMs": 8,
+       "timestamp": 1795848885065
+      }
+     ]
+    },
+    {
+     "type": "turn_start"
+    },
+    {
+     "type": "message_start",
+     "message": {
+      "role": "assistant",
+      "content": [],
+      "api": "openai-completions",
+      "provider": "agentenv",
+      "model": "anthropic/claude-haiku-4-5",
+      "usage": {
+       "input": 0,
+       "output": 0,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "totalTokens": 0,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "error",
+      "timestamp": 1795848885066,
+      "errorMessage": "503: {\"message\":\"service unavailable\",\"code\":503}",
+      "durationMs": 5,
+      "thinkingLevel": "off"
+     }
+    },
+    {
+     "type": "message_end",
+     "message": {
+      "role": "assistant",
+      "content": [],
+      "api": "openai-completions",
+      "provider": "agentenv",
+      "model": "anthropic/claude-haiku-4-5",
+      "usage": {
+       "input": 0,
+       "output": 0,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "totalTokens": 0,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "error",
+      "timestamp": 1795848885066,
+      "errorMessage": "503: {\"message\":\"service unavailable\",\"code\":503}",
+      "durationMs": 5,
+      "thinkingLevel": "off"
+     }
+    },
+    {
+     "type": "turn_end",
+     "message": {
+      "role": "assistant",
+      "content": [],
+      "api": "openai-completions",
+      "provider": "agentenv",
+      "model": "anthropic/claude-haiku-4-5",
+      "usage": {
+       "input": 0,
+       "output": 0,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "totalTokens": 0,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "error",
+      "timestamp": 1795848885066,
+      "errorMessage": "503: {\"message\":\"service unavailable\",\"code\":503}",
+      "durationMs": 5,
+      "thinkingLevel": "off"
+     },
+     "toolResults": []
+    },
+    {
+     "type": "agent_end",
+     "messages": [
+      {
+       "role": "system",
+       "content": "",
+       "sections": {
+        "preamble": "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
+        "tools": "<tools>\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call\n- write: Create or overwrite files\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n</tools>",
+        "rules": "<rules>\n- Use bash for file operations like ls, rg, find\n- Use read to examine files instead of cat or sed.\n- You can inspect PI_* environment variables for current model and session details.\n- Use edit for precise changes (edits[].oldText must match exactly)\n- When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls\n- Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.\n- Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.\n- Use write only for new files or complete rewrites.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>",
+        "docs": "<docs>\nPi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/README.md\n- Additional docs: /opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/docs\n- Examples: /opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing\n- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)\n</docs>",
+        "cwd": "<cwd>\n/workspace\n</cwd>"
+       },
+       "timestamp": 1795848884115,
+       "toolsAdded": [
+        {
+         "name": "read",
+         "description": "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+         "parameters": {
+          "type": "object",
+          "required": [
+           "path"
+          ],
+          "properties": {
+           "path": {
+            "type": "string",
+            "description": "Path to the file to read (relative or absolute)"
+           },
+           "offset": {
+            "type": "number",
+            "description": "Line number to start reading from (1-indexed)"
+           },
+           "limit": {
+            "type": "number",
+            "description": "Maximum number of lines to read"
+           }
+          }
+         },
+         "constrainedSampling": {
+          "type": "json_schema",
+          "strict": "prefer"
+         }
+        },
+        {
+         "name": "bash",
+         "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
+         "parameters": {
+          "type": "object",
+          "required": [
+           "command"
+          ],
+          "properties": {
+           "command": {
+            "type": "string",
+            "description": "Shell command to execute"
+           },
+           "timeout": {
+            "type": "number",
+            "description": "Timeout in seconds (optional, no default timeout)"
+           }
+          }
+         },
+         "constrainedSampling": {
+          "type": "json_schema",
+          "strict": "prefer"
+         }
+        },
+        {
+         "name": "edit",
+         "description": "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
+         "parameters": {
+          "type": "object",
+          "required": [
+           "path",
+           "edits"
+          ],
+          "properties": {
+           "path": {
+            "type": "string",
+            "description": "Path to the file to edit (relative or absolute)"
+           },
+           "edits": {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "required": [
+              "oldText",
+              "newText"
+             ],
+             "properties": {
+              "oldText": {
+               "type": "string",
+               "description": "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."
+              },
+              "newText": {
+               "type": "string",
+               "description": "Replacement text for this targeted edit."
+              }
+             }
+            },
+            "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead."
+           }
+          }
+         },
+         "constrainedSampling": {
+          "type": "json_schema",
+          "strict": "prefer"
+         }
+        },
+        {
+         "name": "write",
+         "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+         "parameters": {
+          "type": "object",
+          "required": [
+           "path",
+           "content"
+          ],
+          "properties": {
+           "path": {
+            "type": "string",
+            "description": "Path to the file to write (relative or absolute)"
+           },
+           "content": {
+            "type": "string",
+            "description": "Content to write to the file"
+           }
+          }
+         },
+         "constrainedSampling": {
+          "type": "json_schema",
+          "strict": "prefer"
+         }
+        }
+       ]
+      },
+      {
+       "role": "user",
+       "content": [
+        {
+         "type": "text",
+         "text": "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
+        }
+       ],
+       "timestamp": 1795848884114
+      },
+      {
+       "role": "assistant",
+       "content": [
+        {
+         "type": "toolCall",
+         "id": "toolu_vrtx_01UYtgBh3WHVrBwfseWAnKBN",
+         "name": "bash",
+         "arguments": {
+          "command": "echo first"
+         }
+        },
+        {
+         "type": "toolCall",
+         "id": "toolu_vrtx_0135LAM8asbETcTRMGv2xBRA",
+         "name": "bash",
+         "arguments": {
+          "command": "echo second"
+         }
+        }
+       ],
+       "api": "openai-completions",
+       "provider": "agentenv",
+       "model": "anthropic/claude-haiku-4-5",
+       "usage": {
+        "input": 1961,
+        "output": 88,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 0,
+        "totalTokens": 2049,
+        "cost": {
+         "input": 0,
+         "output": 0,
+         "cacheRead": 0,
+         "cacheWrite": 0,
+         "total": 0
+        }
+       },
+       "stopReason": "toolUse",
+       "timestamp": 1795848884138,
+       "responseId": "chatcmpl-76c7c76b",
+       "responseModel": "claude-haiku-4-5",
+       "rawStopReason": "tool_calls",
+       "durationMs": 914,
+       "thinkingLevel": "off"
+      },
+      {
+       "role": "toolResult",
+       "toolCallId": "toolu_vrtx_01UYtgBh3WHVrBwfseWAnKBN",
+       "toolName": "bash",
+       "content": [
+        {
+         "type": "text",
+         "text": "first\n"
+        }
+       ],
+       "isError": false,
+       "durationMs": 8,
+       "timestamp": 1795848885065
+      },
+      {
+       "role": "toolResult",
+       "toolCallId": "toolu_vrtx_0135LAM8asbETcTRMGv2xBRA",
+       "toolName": "bash",
+       "content": [
+        {
+         "type": "text",
+         "text": "second\n"
+        }
+       ],
+       "isError": false,
+       "durationMs": 8,
+       "timestamp": 1795848885065
+      },
+      {
+       "role": "assistant",
+       "content": [],
+       "api": "openai-completions",
+       "provider": "agentenv",
+       "model": "anthropic/claude-haiku-4-5",
+       "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0,
+        "cost": {
+         "input": 0,
+         "output": 0,
+         "cacheRead": 0,
+         "cacheWrite": 0,
+         "total": 0
+        }
+       },
+       "stopReason": "error",
+       "timestamp": 1795848885066,
+       "errorMessage": "503: {\"message\":\"service unavailable\",\"code\":503}",
+       "durationMs": 5,
+       "thinkingLevel": "off"
+      }
+     ],
+     "willRetry": true
+    },
+    {
+     "type": "auto_retry_start",
+     "attempt": 1,
+     "maxAttempts": 3,
+     "delayMs": 2000,
+     "errorMessage": "503: {\"message\":\"service unavailable\",\"code\":503}"
+    },
+    {
+     "type": "entry_appended",
+     "entry": {
+      "type": "context_edit",
+      "id": "b1637310",
+      "parentId": "8bd7725e",
+      "timestamp": "2026-11-28T06:54:45.074Z",
+      "targetId": "8bd7725e",
+      "replacement": null
+     }
+    },
+    {
+     "type": "agent_start"
+    },
+    {
+     "type": "turn_start"
+    },
+    {
+     "type": "message_start",
+     "message": {
+      "role": "assistant",
+      "content": [],
+      "api": "openai-completions",
+      "provider": "agentenv",
+      "model": "anthropic/claude-haiku-4-5",
+      "usage": {
+       "input": 0,
+       "output": 0,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "totalTokens": 0,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "error",
+      "timestamp": 1795848887077,
+      "errorMessage": "503: {\"message\":\"service unavailable\",\"code\":503}",
+      "durationMs": 4,
+      "thinkingLevel": "off"
+     }
+    },
+    {
+     "type": "message_end",
+     "message": {
+      "role": "assistant",
+      "content": [],
+      "api": "openai-completions",
+      "provider": "agentenv",
+      "model": "anthropic/claude-haiku-4-5",
+      "usage": {
+       "input": 0,
+       "output": 0,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "totalTokens": 0,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "error",
+      "timestamp": 1795848887077,
+      "errorMessage": "503: {\"message\":\"service unavailable\",\"code\":503}",
+      "durationMs": 4,
+      "thinkingLevel": "off"
+     }
+    },
+    {
+     "type": "turn_end",
+     "message": {
+      "role": "assistant",
+      "content": [],
+      "api": "openai-completions",
+      "provider": "agentenv",
+      "model": "anthropic/claude-haiku-4-5",
+      "usage": {
+       "input": 0,
+       "output": 0,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "totalTokens": 0,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "error",
+      "timestamp": 1795848887077,
+      "errorMessage": "503: {\"message\":\"service unavailable\",\"code\":503}",
+      "durationMs": 4,
+      "thinkingLevel": "off"
+     },
+     "toolResults": []
+    },
+    {
+     "type": "agent_end",
+     "messages": [
+      {
+       "role": "assistant",
+       "content": [],
+       "api": "openai-completions",
+       "provider": "agentenv",
+       "model": "anthropic/claude-haiku-4-5",
+       "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0,
+        "cost": {
+         "input": 0,
+         "output": 0,
+         "cacheRead": 0,
+         "cacheWrite": 0,
+         "total": 0
+        }
+       },
+       "stopReason": "error",
+       "timestamp": 1795848887077,
+       "errorMessage": "503: {\"message\":\"service unavailable\",\"code\":503}",
+       "durationMs": 4,
+       "thinkingLevel": "off"
+      }
+     ],
+     "willRetry": true
+    },
+    {
+     "type": "auto_retry_start",
+     "attempt": 2,
+     "maxAttempts": 3,
+     "delayMs": 4000,
+     "errorMessage": "503: {\"message\":\"service unavailable\",\"code\":503}"
+    },
+    {
+     "type": "entry_appended",
+     "entry": {
+      "type": "context_edit",
+      "id": "5877bab1",
+      "parentId": "a8075b1f",
+      "timestamp": "2026-11-28T06:54:47.081Z",
+      "targetId": "a8075b1f",
+      "replacement": null
+     }
+    },
+    {
+     "type": "agent_start"
+    },
+    {
+     "type": "turn_start"
+    },
+    {
+     "type": "message_start",
+     "message": {
+      "role": "assistant",
+      "content": [],
+      "api": "openai-completions",
+      "provider": "agentenv",
+      "model": "anthropic/claude-haiku-4-5",
+      "usage": {
+       "input": 0,
+       "output": 0,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "totalTokens": 0,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "pending",
+      "timestamp": 1795848891085
+     }
+    },
+    {
+     "type": "message_end",
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "Both outputs on one line: **first** **second**"
+       }
+      ],
+      "api": "openai-completions",
+      "provider": "agentenv",
+      "model": "anthropic/claude-haiku-4-5",
+      "usage": {
+       "input": 2112,
+       "output": 15,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "reasoning": 0,
+       "totalTokens": 2127,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "stop",
+      "timestamp": 1795848891085,
+      "responseId": "chatcmpl-597dfab9",
+      "responseModel": "claude-haiku-4-5",
+      "rawStopReason": "stop",
+      "durationMs": 609,
+      "thinkingLevel": "off"
+     }
+    },
+    {
+     "type": "auto_retry_end",
+     "success": true,
+     "attempt": 2
+    },
+    {
+     "type": "turn_end",
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "Both outputs on one line: **first** **second**"
+       }
+      ],
+      "api": "openai-completions",
+      "provider": "agentenv",
+      "model": "anthropic/claude-haiku-4-5",
+      "usage": {
+       "input": 2112,
+       "output": 15,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "reasoning": 0,
+       "totalTokens": 2127,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "stop",
+      "timestamp": 1795848891085,
+      "responseId": "chatcmpl-597dfab9",
+      "responseModel": "claude-haiku-4-5",
+      "rawStopReason": "stop",
+      "durationMs": 609,
+      "thinkingLevel": "off"
+     },
+     "toolResults": []
+    },
+    {
+     "type": "agent_end",
+     "messages": [
+      {
+       "role": "assistant",
+       "content": [
+        {
+         "type": "text",
+         "text": "Both outputs on one line: **first** **second**"
+        }
+       ],
+       "api": "openai-completions",
+       "provider": "agentenv",
+       "model": "anthropic/claude-haiku-4-5",
+       "usage": {
+        "input": 2112,
+        "output": 15,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 0,
+        "totalTokens": 2127,
+        "cost": {
+         "input": 0,
+         "output": 0,
+         "cacheRead": 0,
+         "cacheWrite": 0,
+         "total": 0
+        }
+       },
+       "stopReason": "stop",
+       "timestamp": 1795848891085,
+       "responseId": "chatcmpl-597dfab9",
+       "responseModel": "claude-haiku-4-5",
+       "rawStopReason": "stop",
+       "durationMs": 609,
+       "thinkingLevel": "off"
+      }
+     ],
+     "willRetry": false
+    },
+    {
+     "type": "agent_settled",
+     "aborted": false
+    }
+   ],
+   "aux": [],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 4073,
+    "output_tokens": 103,
+    "total_tokens": 4176,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "input_includes_cache": true
+   }
+  }
+ ]
+}

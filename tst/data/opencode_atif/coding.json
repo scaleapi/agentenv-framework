@@ -1,0 +1,659 @@
+{
+ "scenario": "coding",
+ "cli": "1.17.18",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-opencode-coding",
+    "task_id": "72c57e36-cb96-460b-940c-34b2519e15c3",
+    "message_id": "4f0814cf7cc14deea17b70830570f34f",
+    "agent_name": "OpenCode",
+    "agent_version": "1.0.0",
+    "agent_model": "anthropic/claude-haiku-4-5",
+    "started_at": "2026-11-28T06:54:19.543885Z",
+    "inbound": [
+     "Create hello.py that prints the sum of the integers 1 to 100, run it with python3, and reply with only the number it prints."
+    ],
+    "state": "completed",
+    "final": [
+     "Now let me run it:\n5050"
+    ],
+    "ended_at": "2026-11-28T06:54:24.907140Z"
+   },
+   "native": [
+    {
+     "type": "step_start",
+     "timestamp": 1795848862839,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220eefc710017WV3ZPStLomg5l",
+      "messageID": "msg_220eef7b0001Y8QkMvYfp72mma",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "step-start"
+     }
+    },
+    {
+     "type": "tool_use",
+     "timestamp": 1795848863226,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "type": "tool",
+      "tool": "write",
+      "callID": "toolu_vrtx_019QoRA1EtQb5RR4BmHt5jmU",
+      "state": {
+       "status": "completed",
+       "input": {
+        "filePath": "/app/hello.py",
+        "content": "print(sum(range(1, 101)))\n"
+       },
+       "output": "Wrote file successfully.",
+       "metadata": {
+        "diagnostics": {},
+        "filepath": "/app/hello.py",
+        "exists": false,
+        "truncated": false
+       },
+       "title": "app/hello.py",
+       "time": {
+        "start": 1795848863198,
+        "end": 1795848863207
+       }
+      },
+      "id": "prt_220eefc74001bW3GJmtUBqju4v",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "messageID": "msg_220eef7b0001Y8QkMvYfp72mma"
+     }
+    },
+    {
+     "type": "step_finish",
+     "timestamp": 1795848863226,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220eefdeb001gTEJkDVJB3t10e",
+      "reason": "tool-calls",
+      "messageID": "msg_220eef7b0001Y8QkMvYfp72mma",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "step-finish",
+      "tokens": {
+       "total": 9430,
+       "input": 9344,
+       "output": 86,
+       "reasoning": 0,
+       "cache": {
+        "write": 0,
+        "read": 0
+       }
+      },
+      "cost": 0
+     }
+    },
+    {
+     "type": "step_start",
+     "timestamp": 1795848863780,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220ef001f001BgpoqDOgMN6o0t",
+      "messageID": "msg_220eefdf3001x8r2nufDkp0v2d",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "step-start"
+     }
+    },
+    {
+     "type": "text",
+     "timestamp": 1795848864152,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220ef0022001hovm6keaskD4Xx",
+      "messageID": "msg_220eefdf3001x8r2nufDkp0v2d",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "text",
+      "text": "Now let me run it:",
+      "time": {
+       "start": 1795848863778,
+       "end": 1795848864146
+      }
+     }
+    },
+    {
+     "type": "tool_use",
+     "timestamp": 1795848864225,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "type": "tool",
+      "tool": "bash",
+      "callID": "toolu_vrtx_016JfpTtfHDs6WBSFF81ApQW",
+      "state": {
+       "status": "completed",
+       "input": {
+        "command": "python3 /app/hello.py"
+       },
+       "output": "5050\n",
+       "metadata": {
+        "output": "5050\n",
+        "exit": 0,
+        "truncated": false
+       },
+       "title": "python3 /app/hello.py",
+       "time": {
+        "start": 1795848864206,
+        "end": 1795848864211
+       }
+      },
+      "id": "prt_220ef00e6001q7fgoyUXWl1Sl6",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "messageID": "msg_220eefdf3001x8r2nufDkp0v2d"
+     }
+    },
+    {
+     "type": "step_finish",
+     "timestamp": 1795848864225,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220ef01d5001ecNqToe1rx8hkx",
+      "reason": "tool-calls",
+      "messageID": "msg_220eefdf3001x8r2nufDkp0v2d",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "step-finish",
+      "tokens": {
+       "total": 9512,
+       "input": 105,
+       "output": 66,
+       "reasoning": 0,
+       "cache": {
+        "write": 0,
+        "read": 9341
+       }
+      },
+      "cost": 0
+     }
+    },
+    {
+     "type": "step_start",
+     "timestamp": 1795848864779,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220ef0403001LGJGpzQdKmU5n3",
+      "messageID": "msg_220ef01dc001pMCZpuSwEnU2ft",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "step-start"
+     }
+    },
+    {
+     "type": "text",
+     "timestamp": 1795848864812,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220ef04070013xtu7UaB6epghy",
+      "messageID": "msg_220ef01dc001pMCZpuSwEnU2ft",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "text",
+      "text": "5050",
+      "time": {
+       "start": 1795848864775,
+       "end": 1795848864798
+      }
+     }
+    },
+    {
+     "type": "step_finish",
+     "timestamp": 1795848864812,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220ef04200017jcMV1JeCyx6Jd",
+      "reason": "stop",
+      "messageID": "msg_220ef01dc001pMCZpuSwEnU2ft",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "step-finish",
+      "tokens": {
+       "total": 9532,
+       "input": 86,
+       "output": 5,
+       "reasoning": 0,
+       "cache": {
+        "write": 0,
+        "read": 9441
+       }
+      },
+      "cost": 0
+     }
+    }
+   ],
+   "aux": [
+    {
+     "name": "turn",
+     "record": {
+      "type": "agentenv.turn",
+      "model": "anthropic/claude-haiku-4-5",
+      "effort": null
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 599,
+       "output_tokens": 14,
+       "total_tokens": 613,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 0,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:54:21.677Z",
+      "timestamp": "2026-11-28T06:54:22.296Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 9344,
+       "output_tokens": 86,
+       "total_tokens": 9430,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 9341,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:54:22.094Z",
+      "timestamp": "2026-11-28T06:54:23.197Z"
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 9446,
+       "output_tokens": 66,
+       "total_tokens": 9512,
+       "cache_read_tokens": 9341,
+       "cache_write_tokens": 100,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:54:23.242Z",
+      "timestamp": "2026-11-28T06:54:24.135Z"
+     },
+     "after": 4
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 9527,
+       "output_tokens": 5,
+       "total_tokens": 9532,
+       "cache_read_tokens": 9441,
+       "cache_write_tokens": 80,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:54:24.245Z",
+      "timestamp": "2026-11-28T06:54:24.797Z"
+     },
+     "after": 8
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 28916,
+    "output_tokens": 171,
+    "total_tokens": 29087,
+    "cache_read_tokens": 18782,
+    "cache_write_tokens": 9521,
+    "cache_write_ttl_tokens": {
+     "5m": 9521
+    },
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "anthropic/claude-haiku-4-5",
+      "calls": 4,
+      "input_tokens": 28916,
+      "output_tokens": 171,
+      "cache_read_tokens": 18782,
+      "cache_write_tokens": 9521,
+      "input_includes_cache": true,
+      "cache_write_ttl_tokens": {
+       "5m": 9521
+      }
+     }
+    ],
+    "provider_details": {
+     "model_calls": 4
+    }
+   }
+  },
+  {
+   "turn": {
+    "index": 1,
+    "context_id": "ctx-opencode-coding",
+    "task_id": "02cad381-127c-4696-a4dd-203db51344a0",
+    "message_id": "aaa462a735684fdc9c0305f5c85c92ae",
+    "agent_name": "OpenCode",
+    "agent_version": "1.0.0",
+    "agent_model": "anthropic/claude-haiku-4-5",
+    "started_at": "2026-11-28T06:54:25.578926Z",
+    "inbound": [
+     "Now change it to sum 1 to 1000, run it again, and reply with only the number."
+    ],
+    "state": "completed",
+    "final": [
+     "500500"
+    ],
+    "ended_at": "2026-11-28T06:54:30.584962Z"
+   },
+   "native": [
+    {
+     "type": "step_start",
+     "timestamp": 1795848868452,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220ef125e0017wr1GeX6QvHL3o",
+      "messageID": "msg_220ef0d26001W70B1GG2IsllnX",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "step-start"
+     }
+    },
+    {
+     "type": "tool_use",
+     "timestamp": 1795848868936,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "type": "tool",
+      "tool": "edit",
+      "callID": "toolu_vrtx_01RwsebYyjBMQtETeosqa2Ah",
+      "state": {
+       "status": "completed",
+       "input": {
+        "filePath": "/app/hello.py",
+        "oldString": "print(sum(range(1, 101)))",
+        "newString": "print(sum(range(1, 1001)))"
+       },
+       "output": "Edit applied successfully.",
+       "metadata": {
+        "diagnostics": {},
+        "diff": "Index: /app/hello.py\n===================================================================\n--- /app/hello.py\n+++ /app/hello.py\n@@ -1,1 +1,1 @@\n-print(sum(range(1, 101)))\n+print(sum(range(1, 1001)))\n",
+        "filediff": {
+         "file": "/app/hello.py",
+         "patch": "Index: /app/hello.py\n===================================================================\n--- /app/hello.py\n+++ /app/hello.py\n@@ -1,1 +1,1 @@\n-print(sum(range(1, 101)))\n+print(sum(range(1, 1001)))\n",
+         "additions": 1,
+         "deletions": 1
+        },
+        "truncated": false
+       },
+       "title": "app/hello.py",
+       "time": {
+        "start": 1795848868905,
+        "end": 1795848868913
+       }
+      },
+      "id": "prt_220ef12610015vrT2ToszhnMXg",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "messageID": "msg_220ef0d26001W70B1GG2IsllnX"
+     }
+    },
+    {
+     "type": "step_finish",
+     "timestamp": 1795848868936,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220ef14360013TLTVodyU83PNO",
+      "reason": "tool-calls",
+      "messageID": "msg_220ef0d26001W70B1GG2IsllnX",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "step-finish",
+      "tokens": {
+       "total": 9674,
+       "input": 38,
+       "output": 115,
+       "reasoning": 0,
+       "cache": {
+        "write": 0,
+        "read": 9521
+       }
+      },
+      "cost": 0
+     }
+    },
+    {
+     "type": "step_start",
+     "timestamp": 1795848869590,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220ef16ce001bJY9reGMyLcbEa",
+      "messageID": "msg_220ef14420019NOFGC4m1UC8rx",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "step-start"
+     }
+    },
+    {
+     "type": "tool_use",
+     "timestamp": 1795848869856,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "type": "tool",
+      "tool": "bash",
+      "callID": "toolu_vrtx_0179nUWc5HLf7c7hVrPTCHU5",
+      "state": {
+       "status": "completed",
+       "input": {
+        "command": "python3 /app/hello.py"
+       },
+       "output": "500500\n",
+       "metadata": {
+        "output": "500500\n",
+        "exit": 0,
+        "truncated": false
+       },
+       "title": "python3 /app/hello.py",
+       "time": {
+        "start": 1795848869837,
+        "end": 1795848869843
+       }
+      },
+      "id": "prt_220ef16d2001mL4zS70SdZX7Fx",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "messageID": "msg_220ef14420019NOFGC4m1UC8rx"
+     }
+    },
+    {
+     "type": "step_finish",
+     "timestamp": 1795848869856,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220ef17d6001srNIF828D52sGz",
+      "reason": "tool-calls",
+      "messageID": "msg_220ef14420019NOFGC4m1UC8rx",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "step-finish",
+      "tokens": {
+       "total": 9748,
+       "input": 133,
+       "output": 59,
+       "reasoning": 0,
+       "cache": {
+        "write": 0,
+        "read": 9556
+       }
+      },
+      "cost": 0
+     }
+    },
+    {
+     "type": "step_start",
+     "timestamp": 1795848870483,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220ef1a4d001p4CiY61XAkoMIz",
+      "messageID": "msg_220ef17dc001LDX7fxcyjw37F9",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "step-start"
+     }
+    },
+    {
+     "type": "text",
+     "timestamp": 1795848870519,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220ef1a50001O3Bb6n1gXZlWqQ",
+      "messageID": "msg_220ef17dc001LDX7fxcyjw37F9",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "text",
+      "text": "500500",
+      "time": {
+       "start": 1795848870480,
+       "end": 1795848870508
+      }
+     }
+    },
+    {
+     "type": "step_finish",
+     "timestamp": 1795848870519,
+     "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+     "part": {
+      "id": "prt_220ef1a6e001TTrGn3QRdDYc5P",
+      "reason": "stop",
+      "messageID": "msg_220ef17dc001LDX7fxcyjw37F9",
+      "sessionID": "ses_ddf110a96ffe1mm6fitq9Nv48h",
+      "type": "step-finish",
+      "tokens": {
+       "total": 9768,
+       "input": 79,
+       "output": 5,
+       "reasoning": 0,
+       "cache": {
+        "write": 0,
+        "read": 9684
+       }
+      },
+      "cost": 0
+     }
+    }
+   ],
+   "aux": [
+    {
+     "name": "turn",
+     "record": {
+      "type": "agentenv.turn",
+      "model": "anthropic/claude-haiku-4-5",
+      "effort": null
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 9559,
+       "output_tokens": 115,
+       "total_tokens": 9674,
+       "cache_read_tokens": 9521,
+       "cache_write_tokens": 35,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:54:27.783Z",
+      "timestamp": "2026-11-28T06:54:28.881Z"
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 9689,
+       "output_tokens": 59,
+       "total_tokens": 9748,
+       "cache_read_tokens": 9556,
+       "cache_write_tokens": 128,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:54:28.961Z",
+      "timestamp": "2026-11-28T06:54:29.775Z"
+     },
+     "after": 4
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 9763,
+       "output_tokens": 5,
+       "total_tokens": 9768,
+       "cache_read_tokens": 9684,
+       "cache_write_tokens": 73,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:54:29.874Z",
+      "timestamp": "2026-11-28T06:54:30.505Z"
+     },
+     "after": 7
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 29011,
+    "output_tokens": 179,
+    "total_tokens": 29190,
+    "cache_read_tokens": 28761,
+    "cache_write_tokens": 236,
+    "cache_write_ttl_tokens": {
+     "5m": 236
+    },
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "anthropic/claude-haiku-4-5",
+      "calls": 3,
+      "input_tokens": 29011,
+      "output_tokens": 179,
+      "cache_read_tokens": 28761,
+      "cache_write_tokens": 236,
+      "input_includes_cache": true,
+      "cache_write_ttl_tokens": {
+       "5m": 236
+      }
+     }
+    ],
+    "provider_details": {
+     "model_calls": 3
+    }
+   }
+  }
+ ]
+}

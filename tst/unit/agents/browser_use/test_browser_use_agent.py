@@ -1,4 +1,3 @@
-import importlib.util
 import json
 import os
 import sys
@@ -7,18 +6,12 @@ from typing import Any
 
 import pytest
 from agentenv_protocol.a2a_agent import Usage
+from agentenv_protocol.atif import RecordedTask, check_adapter, errors_in, profile_of, validate
 from starlette.testclient import TestClient
 
-import agent_env
 from agent_env.config.model_pricing import litellm_prices
 from agent_env.task_step.usage import RoleUsage
-
-AGENT_DIR = Path(agent_env.__file__).parent / "agents" / "agents" / "browser-use"
-# By its path: another agent's a2a_server, imported by the same name, may be loaded already.
-_spec = importlib.util.spec_from_file_location("browser_use_a2a_server", AGENT_DIR / "a2a_server.py")
-a2a_server = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = a2a_server
-_spec.loader.exec_module(a2a_server)
+from tst.unit.agents.browser_use.agent import a2a_server, browser_use_atif
 
 FAKE_AGENT = Path(__file__).with_name("fake_agent.py")
 HTTP_URL = "http://computer.test/svc/chromium/cdp/t/"
@@ -179,3 +172,56 @@ def test_a_turn_past_its_deadline_is_killed(client: TestClient, record: Path, mo
     assert _reply(_send(client, "hi"))[1]["error_code"] == "browser_use.timeout"
     with pytest.raises(ProcessLookupError):
         os.kill(json.loads(record.read_text())["pid"], 0)
+
+
+def test_the_card_offers_atif_beside_browser_uses_messages_which_stay_the_default(client: TestClient) -> None:
+    card = client.get("/.well-known/agent.json").json()
+    (trajectory,) = [e for e in card["capabilities"]["extensions"] if e["uri"] == "urn:agentenv:trajectory/v1"]
+
+    assert trajectory["params"]["formats"] == ["browser-use-messages/1", "atif/1"]
+    assert trajectory["params"]["native"] == trajectory["params"]["default"] == "browser-use-messages/1"
+
+
+def test_a_turn_that_builds_atif_feeds_what_agent_py_kept_before_its_messages(client: TestClient, record: Path) -> None:
+    """The copy holds the turn's own run, each model call a step whose counts and cost sum to the turn's usage, the
+    pruned screenshot as media, and the answer once, as the step that delivered it; it's what the kit replays."""
+    assert client.post("/ext/trajectory/prescribe", json={"formats": ["atif/1"]}).status_code == 200
+    task = _send(client, "top story?")
+    text, data = _reply(task)
+    native = client.post("/ext/trajectory", json={"task_id": task["id"]}).json()["trajectory"]
+    atif = client.post("/ext/trajectory", json={"task_id": task["id"], "format": "atif/1"}).json()
+    document, usage = atif["trajectory"], data["usage"]
+
+    assert json.loads(record.read_text())["atif"] is True
+    assert [entry["name"] for entry in atif["aux"]] == ["turn", *["attempt"] * 4, "summary", "images"]
+    assert all(entry["after"] == 0 for entry in atif["aux"])
+    assert atif["aux"][0]["record"] == {"run_id": "run-2", "status": "completed", "text": "The top story.",
+                                        "model": "gpt-test", "effort": "low", "cost_usd": 0.0008}
+    assert len(native) == 7 and usage["tool_call_count"] == 2
+    kit = check_adapter(browser_use_atif.BrowserUseAtif,
+                        [RecordedTask.from_served(atif["turn_context"], native, atif["aux"])])
+    kit.raise_for_errors()
+    assert kit.document == {key: value for key, value in document.items() if key != "trajectory_id"}
+    assert not errors_in(validate(document))
+
+    steps = [step for step in document["steps"] if step["source"] == "agent"]
+    assert [step["llm_call_count"] for step in steps] == [1, 1, 0, 1]
+    assert profile_of(steps[1])["compaction"]["written_by"] == "assistant"
+    assert profile_of(steps[2])["error"]["message"] == "the endpoint refused the call (HTTP 503)"
+    assert steps[0]["observation"]["results"][0]["content"][1]["type"] == "image"
+    assert steps[-1]["message"] == text == "The top story."
+    totals = document["final_metrics"]
+    assert (totals["total_prompt_tokens"], totals["total_completion_tokens"], totals["total_cached_tokens"],
+            profile_of(totals)["total_cache_write_tokens"]) == (
+        usage["input_tokens"], usage["output_tokens"], usage["cache_read_tokens"], usage["cache_write_tokens"])
+    assert totals["total_cost_usd"] == usage["cost_usd"] == pytest.approx(sum(
+        step["metrics"]["cost_usd"] for step in steps if step["llm_call_count"]))
+
+
+def test_a_turn_that_doesnt_build_atif_keeps_nothing_for_it(client: TestClient, record: Path) -> None:
+    task = _send(client, "top story?")
+    native = client.post("/ext/trajectory", json={"task_id": task["id"]}).json()["trajectory"]
+
+    assert json.loads(record.read_text())["atif"] is False
+    assert [message["kind"] for message in native] == ["request", "response", "response"]
+    assert client.post("/ext/trajectory", json={"task_id": task["id"], "format": "atif/1"}).status_code >= 400

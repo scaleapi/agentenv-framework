@@ -178,6 +178,8 @@ async def test_a_gateway_that_doesn_t_report_its_contacts_limits_gets_the_gatewa
 
 @pytest.mark.asyncio
 async def test_an_event_due_that_won_t_go_gets_the_settle_timeout_not_forever(monkeypatch, tmp_path):
+    """It waits settle_timeout_seconds, not the settle's cap, which is at least the contact grace: a poll or two on a
+    busy machine stays far below that."""
     rig = Rig(monkeypatch, tmp_path)
     await rig.arm()
     engine = rig.gw._trigger_engine
@@ -187,7 +189,7 @@ async def test_an_event_due_that_won_t_go_gets_the_settle_timeout_not_forever(mo
 
     [timeout] = rig.events(ctx, "settle_timeout")
     [env] = timeout["still_at_work"]
-    assert env["due_not_going"] == "2026-11-09T14:00:00Z" and timeout["settle"]["seconds"] < 1.5
+    assert env["due_not_going"] == "2026-11-09T14:00:00Z" and timeout["settle"]["seconds"] < ao.CONTACT_GRACE_SECONDS
 
 
 @pytest.mark.asyncio

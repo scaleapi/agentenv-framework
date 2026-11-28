@@ -1,0 +1,404 @@
+{
+ "scenario": "subagent",
+ "cli": "2.61.0",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-pydantic-ai-subagent",
+    "task_id": "bd605567-3d1a-481c-975a-41a8699b0471",
+    "message_id": "c3d696ef78b748b99d3a9ac306dba7ea",
+    "agent_name": "Pydantic AI",
+    "agent_version": "2.61.0",
+    "agent_model": "anthropic/claude-haiku-4-5",
+    "started_at": "2026-11-28T06:55:07.963309Z",
+    "inbound": [
+     "Use your delegate_task tool with agent_name \"self\" to have a sub-agent run `wc -l /etc/passwd` with its shell tool and report the count back to you. Then reply with only that number."
+    ],
+    "state": "completed",
+    "final": [
+     "20"
+    ],
+    "ended_at": "2026-11-28T06:55:11.902161Z"
+   },
+   "native": [
+    {
+     "parts": [
+      {
+       "content": [
+        "Use your delegate_task tool with agent_name \"self\" to have a sub-agent run `wc -l /etc/passwd` with its shell tool and report the count back to you. Then reply with only that number."
+       ],
+       "timestamp": "2026-11-28T06:55:08.227743Z",
+       "part_kind": "user-prompt"
+      },
+      {
+       "instructions": [
+        {
+         "id": "capability:coder_instructions",
+         "dynamic": false,
+         "content_hash": "a623d0fbe34d037ea313d6edef2804a6c9a49a7eb5d40ee39321553ca002cc40",
+         "part_kind": "instruction-digest"
+        },
+        {
+         "id": "capability:sub_agents",
+         "dynamic": false,
+         "content_hash": "1a01e4b94fc3197bebe8981055a448129712e9be7dfe5f8f26edc841fcc5f433",
+         "part_kind": "instruction-digest"
+        },
+        {
+         "id": "capability:coder_instructions",
+         "dynamic": true,
+         "content_hash": "aa4d848ad03e5f4e6fa6f212568e28df41d60e6f165dfea60c7e233d6a9153cf",
+         "part_kind": "instruction-digest"
+        },
+        {
+         "content": "",
+         "dynamic": true,
+         "on_change": "append",
+         "name": null,
+         "id": "capability:repo_context",
+         "part_kind": "instruction"
+        }
+       ],
+       "part_kind": "instruction-baseline"
+      }
+     ],
+     "timestamp": "2026-11-28T06:55:08.228744Z",
+     "instructions": "You are a software engineering agent. Use tools to investigate, implement, and\nverify the requested work. Read existing code and follow repository instructions\nand conventions. Prefer focused changes that fix causes, not symptoms.\n\nApply DRY, YAGNI, SOLID, and the Zen of Python pragmatically: simple, explicit,\ncohesive code beats abstractions without a present need.\n\nWork autonomously until complete. Ask only for missing requirements, credentials,\nconsequential ambiguity, or approval for irreversible actions. Use reasonable\ndefaults for minor ambiguities. Run focused tests and appropriate lint/type checks;\nreport what you actually verified, assumptions, and remaining limitations.\n\nLeave only the requested change in the project. Check behavior with inline shell\nscripts (e.g. a heredoc) rather than new files, add tests only where the project\nalready has them, and delete any scratch files you created before finishing.\n\nFinish required long-running work before responding: do other useful work, then\npoll status and output until complete or blocked. Servers may remain running once\nreadiness is verified; shut them down when no longer needed.\n\nYou can delegate self-contained tasks to these sub-agents using the `delegate_task` tool. Each runs in its own fresh context and does not see this conversation, so pass everything it needs.\n\nAvailable sub-agents:\n- self: A fresh run of this same agent, with all of your tools, instructions, and capabilities. Use it to hand off a self-contained part of the work.\n\nYour project is `/workspace`. Shell commands start there, and relative file paths resolve from it.",
+     "kind": "request",
+     "run_id": "01a220ef-ad76-71cc-81a6-1b5911a35eef",
+     "conversation_id": "01a220ef-ad76-71cc-81a6-1b5ac3f88070",
+     "metadata": null,
+     "state": "complete"
+    },
+    {
+     "parts": [
+      {
+       "tool_name": "delegate_task",
+       "args": "{\"agent_name\": \"self\", \"task\": \"Run the command `wc -l /etc/passwd` and report back the number of lines from the output.\"}",
+       "tool_call_id": "toolu_vrtx_013M1J9ghDtPzWJc8FGZXLgn",
+       "tool_kind": null,
+       "id": null,
+       "provider_name": null,
+       "provider_details": null,
+       "part_kind": "tool-call"
+      }
+     ],
+     "usage": {
+      "input_tokens": 3941,
+      "cache_write_tokens": 0,
+      "cache_write_1h_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 95,
+      "output_reasoning_tokens": 0,
+      "input_audio_tokens": 0,
+      "cache_audio_read_tokens": 0,
+      "output_audio_tokens": 0,
+      "audio_seconds": 0.0,
+      "details": {
+       "cache_creation_input_tokens": 0,
+       "cache_read_input_tokens": 0,
+       "reasoning_tokens": 0,
+       "text_tokens": 95
+      },
+      "cost": null
+     },
+     "model_name": "claude-haiku-4-5",
+     "timestamp": "2026-11-28T06:55:09.015525Z",
+     "kind": "response",
+     "provider_name": "openai",
+     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_details": {
+      "timestamp": "2026-11-28T06:55:08Z",
+      "service_tier": "standard",
+      "finish_reason": "tool_calls"
+     },
+     "provider_response_id": "chatcmpl-4abdc033",
+     "finish_reason": "tool_call",
+     "run_id": "01a220ef-ad76-71cc-81a6-1b5911a35eef",
+     "conversation_id": "01a220ef-ad76-71cc-81a6-1b5ac3f88070",
+     "metadata": null,
+     "workspace_ref": {
+      "provider": "local",
+      "id": "/workspace"
+     },
+     "history_digest": null,
+     "failed_attempts": null,
+     "state": "complete"
+    },
+    {
+     "parts": [
+      {
+       "tool_name": "delegate_task",
+       "content": "The `/etc/passwd` file has **20 lines**.",
+       "tool_call_id": "toolu_vrtx_013M1J9ghDtPzWJc8FGZXLgn",
+       "tool_kind": null,
+       "metadata": null,
+       "timestamp": "2026-11-28T06:55:11.326623Z",
+       "outcome": "success",
+       "retry": null,
+       "part_kind": "tool-return"
+      }
+     ],
+     "timestamp": "2026-11-28T06:55:11.327093Z",
+     "instructions": "You are a software engineering agent. Use tools to investigate, implement, and\nverify the requested work. Read existing code and follow repository instructions\nand conventions. Prefer focused changes that fix causes, not symptoms.\n\nApply DRY, YAGNI, SOLID, and the Zen of Python pragmatically: simple, explicit,\ncohesive code beats abstractions without a present need.\n\nWork autonomously until complete. Ask only for missing requirements, credentials,\nconsequential ambiguity, or approval for irreversible actions. Use reasonable\ndefaults for minor ambiguities. Run focused tests and appropriate lint/type checks;\nreport what you actually verified, assumptions, and remaining limitations.\n\nLeave only the requested change in the project. Check behavior with inline shell\nscripts (e.g. a heredoc) rather than new files, add tests only where the project\nalready has them, and delete any scratch files you created before finishing.\n\nFinish required long-running work before responding: do other useful work, then\npoll status and output until complete or blocked. Servers may remain running once\nreadiness is verified; shut them down when no longer needed.\n\nYou can delegate self-contained tasks to these sub-agents using the `delegate_task` tool. Each runs in its own fresh context and does not see this conversation, so pass everything it needs.\n\nAvailable sub-agents:\n- self: A fresh run of this same agent, with all of your tools, instructions, and capabilities. Use it to hand off a self-contained part of the work.\n\nYour project is `/workspace`. Shell commands start there, and relative file paths resolve from it.",
+     "kind": "request",
+     "run_id": "01a220ef-ad76-71cc-81a6-1b5911a35eef",
+     "conversation_id": "01a220ef-ad76-71cc-81a6-1b5ac3f88070",
+     "metadata": null,
+     "state": "complete"
+    },
+    {
+     "parts": [
+      {
+       "content": "20",
+       "id": null,
+       "provider_name": null,
+       "provider_details": null,
+       "citations": null,
+       "part_kind": "text"
+      }
+     ],
+     "usage": {
+      "input_tokens": 4061,
+      "cache_write_tokens": 0,
+      "cache_write_1h_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 4,
+      "output_reasoning_tokens": 0,
+      "input_audio_tokens": 0,
+      "cache_audio_read_tokens": 0,
+      "output_audio_tokens": 0,
+      "audio_seconds": 0.0,
+      "details": {
+       "cache_creation_input_tokens": 0,
+       "cache_read_input_tokens": 0,
+       "reasoning_tokens": 0,
+       "text_tokens": 4
+      },
+      "cost": null
+     },
+     "model_name": "claude-haiku-4-5",
+     "timestamp": "2026-11-28T06:55:11.844481Z",
+     "kind": "response",
+     "provider_name": "openai",
+     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_details": {
+      "timestamp": "2026-11-28T06:55:11Z",
+      "service_tier": "standard",
+      "finish_reason": "stop"
+     },
+     "provider_response_id": "chatcmpl-677e756f",
+     "finish_reason": "stop",
+     "run_id": "01a220ef-ad76-71cc-81a6-1b5911a35eef",
+     "conversation_id": "01a220ef-ad76-71cc-81a6-1b5ac3f88070",
+     "metadata": null,
+     "workspace_ref": {
+      "provider": "local",
+      "id": "/workspace"
+     },
+     "history_digest": null,
+     "failed_attempts": null,
+     "state": "complete"
+    }
+   ],
+   "aux": [
+    {
+     "name": "turn",
+     "record": {
+      "effort": null
+     },
+     "after": 0
+    },
+    {
+     "name": "delegated",
+     "record": {
+      "run": "01a220ef-b26d-7736-9ab4-7038f4feb705",
+      "parent": null,
+      "spawned_by": "toolu_vrtx_013M1J9ghDtPzWJc8FGZXLgn",
+      "message": {
+       "parts": [
+        {
+         "content": "Run the command `wc -l /etc/passwd` and report back the number of lines from the output.",
+         "timestamp": "2026-11-28T06:55:09.424293Z",
+         "part_kind": "user-prompt"
+        }
+       ],
+       "timestamp": "2026-11-28T06:55:09.424461Z",
+       "instructions": "You are a software engineering agent. Use tools to investigate, implement, and\nverify the requested work. Read existing code and follow repository instructions\nand conventions. Prefer focused changes that fix causes, not symptoms.\n\nApply DRY, YAGNI, SOLID, and the Zen of Python pragmatically: simple, explicit,\ncohesive code beats abstractions without a present need.\n\nWork autonomously until complete. Ask only for missing requirements, credentials,\nconsequential ambiguity, or approval for irreversible actions. Use reasonable\ndefaults for minor ambiguities. Run focused tests and appropriate lint/type checks;\nreport what you actually verified, assumptions, and remaining limitations.\n\nLeave only the requested change in the project. Check behavior with inline shell\nscripts (e.g. a heredoc) rather than new files, add tests only where the project\nalready has them, and delete any scratch files you created before finishing.\n\nFinish required long-running work before responding: do other useful work, then\npoll status and output until complete or blocked. Servers may remain running once\nreadiness is verified; shut them down when no longer needed.\n\nYou can delegate self-contained tasks to these sub-agents using the `delegate_task` tool. Each runs in its own fresh context and does not see this conversation, so pass everything it needs.\n\nAvailable sub-agents:\n- self: A fresh run of this same agent, with all of your tools, instructions, and capabilities. Use it to hand off a self-contained part of the work.\n\nYour project is `/workspace`. Shell commands start there, and relative file paths resolve from it.",
+       "kind": "request",
+       "run_id": "01a220ef-b26d-7736-9ab4-7038f4feb705",
+       "conversation_id": "01a220ef-b26d-7736-9ab4-703966f3e1ad",
+       "metadata": null,
+       "state": "complete"
+      }
+     },
+     "after": 2
+    },
+    {
+     "name": "delegated",
+     "record": {
+      "run": "01a220ef-b26d-7736-9ab4-7038f4feb705",
+      "parent": null,
+      "spawned_by": "toolu_vrtx_013M1J9ghDtPzWJc8FGZXLgn",
+      "message": {
+       "parts": [
+        {
+         "tool_name": "shell",
+         "args": "{\"command\": \"wc -l /etc/passwd\"}",
+         "tool_call_id": "toolu_vrtx_01TjWMTpUt3eD2LGYSvqWe7G",
+         "tool_kind": null,
+         "id": null,
+         "provider_name": null,
+         "provider_details": null,
+         "part_kind": "tool-call"
+        }
+       ],
+       "usage": {
+        "input_tokens": 3916,
+        "cache_write_tokens": 0,
+        "cache_write_1h_tokens": 0,
+        "cache_read_tokens": 0,
+        "output_tokens": 59,
+        "output_reasoning_tokens": 0,
+        "input_audio_tokens": 0,
+        "cache_audio_read_tokens": 0,
+        "output_audio_tokens": 0,
+        "audio_seconds": 0.0,
+        "details": {
+         "cache_creation_input_tokens": 0,
+         "cache_read_input_tokens": 0,
+         "reasoning_tokens": 0,
+         "text_tokens": 59
+        },
+        "cost": null
+       },
+       "model_name": "claude-haiku-4-5",
+       "timestamp": "2026-11-28T06:55:10.034536Z",
+       "kind": "response",
+       "provider_name": "openai",
+       "provider_url": "https://litellm-proxy.ml.scale.com",
+       "provider_details": {
+        "timestamp": "2026-11-28T06:55:09Z",
+        "service_tier": "standard",
+        "finish_reason": "tool_calls"
+       },
+       "provider_response_id": "chatcmpl-33f3624d",
+       "finish_reason": "tool_call",
+       "run_id": null,
+       "conversation_id": null,
+       "metadata": null,
+       "workspace_ref": null,
+       "history_digest": null,
+       "failed_attempts": null,
+       "state": "complete"
+      }
+     },
+     "after": 2
+    },
+    {
+     "name": "delegated",
+     "record": {
+      "run": "01a220ef-b26d-7736-9ab4-7038f4feb705",
+      "parent": null,
+      "spawned_by": "toolu_vrtx_013M1J9ghDtPzWJc8FGZXLgn",
+      "message": {
+       "parts": [
+        {
+         "tool_name": "shell",
+         "content": "20 /etc/passwd\nPID: 12 (supervisor; use `kill -- -12` to stop the whole process tree)\nOutput: /workspace/.pydantic-ai-harness/shell/fbd18f99762c44a9be7068c5172c7231/output.log\nStatus: /workspace/.pydantic-ai-harness/shell/fbd18f99762c44a9be7068c5172c7231/status.json\n{\"pid\": 12, \"exit_code\": 0}",
+         "tool_call_id": "toolu_vrtx_01TjWMTpUt3eD2LGYSvqWe7G",
+         "tool_kind": null,
+         "metadata": null,
+         "timestamp": "2026-11-28T06:55:10.371096Z",
+         "outcome": "success",
+         "retry": null,
+         "part_kind": "tool-return"
+        }
+       ],
+       "timestamp": "2026-11-28T06:55:10.371683Z",
+       "instructions": "You are a software engineering agent. Use tools to investigate, implement, and\nverify the requested work. Read existing code and follow repository instructions\nand conventions. Prefer focused changes that fix causes, not symptoms.\n\nApply DRY, YAGNI, SOLID, and the Zen of Python pragmatically: simple, explicit,\ncohesive code beats abstractions without a present need.\n\nWork autonomously until complete. Ask only for missing requirements, credentials,\nconsequential ambiguity, or approval for irreversible actions. Use reasonable\ndefaults for minor ambiguities. Run focused tests and appropriate lint/type checks;\nreport what you actually verified, assumptions, and remaining limitations.\n\nLeave only the requested change in the project. Check behavior with inline shell\nscripts (e.g. a heredoc) rather than new files, add tests only where the project\nalready has them, and delete any scratch files you created before finishing.\n\nFinish required long-running work before responding: do other useful work, then\npoll status and output until complete or blocked. Servers may remain running once\nreadiness is verified; shut them down when no longer needed.\n\nYou can delegate self-contained tasks to these sub-agents using the `delegate_task` tool. Each runs in its own fresh context and does not see this conversation, so pass everything it needs.\n\nAvailable sub-agents:\n- self: A fresh run of this same agent, with all of your tools, instructions, and capabilities. Use it to hand off a self-contained part of the work.\n\nYour project is `/workspace`. Shell commands start there, and relative file paths resolve from it.",
+       "kind": "request",
+       "run_id": "01a220ef-b26d-7736-9ab4-7038f4feb705",
+       "conversation_id": "01a220ef-b26d-7736-9ab4-703966f3e1ad",
+       "metadata": null,
+       "state": "complete"
+      }
+     },
+     "after": 2
+    },
+    {
+     "name": "delegated",
+     "record": {
+      "run": "01a220ef-b26d-7736-9ab4-7038f4feb705",
+      "parent": null,
+      "spawned_by": "toolu_vrtx_013M1J9ghDtPzWJc8FGZXLgn",
+      "message": {
+       "parts": [
+        {
+         "content": "The `/etc/passwd` file has **20 lines**.",
+         "id": null,
+         "provider_name": null,
+         "provider_details": null,
+         "citations": null,
+         "part_kind": "text"
+        }
+       ],
+       "usage": {
+        "input_tokens": 4111,
+        "cache_write_tokens": 0,
+        "cache_write_1h_tokens": 0,
+        "cache_read_tokens": 0,
+        "output_tokens": 16,
+        "output_reasoning_tokens": 0,
+        "input_audio_tokens": 0,
+        "cache_audio_read_tokens": 0,
+        "output_audio_tokens": 0,
+        "audio_seconds": 0.0,
+        "details": {
+         "cache_creation_input_tokens": 0,
+         "cache_read_input_tokens": 0,
+         "reasoning_tokens": 0,
+         "text_tokens": 16
+        },
+        "cost": null
+       },
+       "model_name": "claude-haiku-4-5",
+       "timestamp": "2026-11-28T06:55:11.191417Z",
+       "kind": "response",
+       "provider_name": "openai",
+       "provider_url": "https://litellm-proxy.ml.scale.com",
+       "provider_details": {
+        "timestamp": "2026-11-28T06:55:10Z",
+        "service_tier": "standard",
+        "finish_reason": "stop"
+       },
+       "provider_response_id": "chatcmpl-02a1cac6",
+       "finish_reason": "stop",
+       "run_id": null,
+       "conversation_id": null,
+       "metadata": null,
+       "workspace_ref": null,
+       "history_digest": null,
+       "failed_attempts": null,
+       "state": "complete"
+      }
+     },
+     "after": 2
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 16029,
+    "output_tokens": 174,
+    "total_tokens": 16203,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "input_includes_cache": true,
+    "provider_details": {
+     "requests": 4
+    }
+   }
+  }
+ ]
+}

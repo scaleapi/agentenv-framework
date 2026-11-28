@@ -87,6 +87,7 @@ def _through_relay(answers, exercise, **relay_options):
     it returned, the relay's calls and the endpoint."""
     endpoint, calls = Endpoint(), model_relay.Calls()
     endpoint.answers = list(answers)
+    endpoint.calls = calls
 
     async def run():
         runner, upstream = await _serve(endpoint)
@@ -169,13 +170,64 @@ def test_a_call_whose_cli_hung_up_is_read_to_its_end_and_counted():
     assert [usage.input_tokens for _, usage in calls.answered] == [20948]
 
 
+
+def test_a_sink_is_handed_each_call_as_it_ends_with_its_counts_and_times():
+    records = []
+    endpoint, calls = Endpoint(), model_relay.Calls(sink=records.append)
+    endpoint.answers = [(200, CLAUDE_STREAM, "text/event-stream"), (503, "busy", "text/plain")]
+
+    async def run():
+        runner, upstream = await _serve(endpoint)
+        try:
+            async with model_relay.model_relay(upstream, calls) as root:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    await _chat(client, root)
+                    await _chat(client, root)
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+
+    answered, refused = records
+    assert {k: answered[k] for k in ("type", "via", "model", "status", "outcome")} == {
+        "type": "agentenv.model_call", "via": "relay", "model": "m", "status": 200, "outcome": "answered"}
+    assert answered["usage"] == {"input_tokens": 20948, "output_tokens": 43, "total_tokens": 20991,
+                                 "cache_read_tokens": 10363, "cache_write_tokens": 199, "input_includes_cache": True}
+    assert answered["started"] <= answered["timestamp"] <= refused["started"] <= refused["timestamp"]
+    assert (refused["outcome"], refused["status"], "usage" in refused) == ("refused", 503, False)
+
+
+def test_a_sink_that_raises_leaves_the_call_answered_and_counted():
+    def broken(record):
+        raise RuntimeError("the turn's trajectory went away")
+
+    endpoint, calls = Endpoint(), model_relay.Calls(sink=broken)
+    endpoint.answers = [(200, CLAUDE_STREAM, "text/event-stream")]
+
+    async def run():
+        runner, upstream = await _serve(endpoint)
+        try:
+            async with model_relay.model_relay(upstream, calls) as root:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    return (await _chat(client, root)).text
+        finally:
+            await runner.cleanup()
+
+    assert asyncio.run(run()) == CLAUDE_STREAM
+    assert [usage.input_tokens for _, usage in calls.answered] == [20948]
+
+
 def test_a_call_whose_cli_hung_up_before_the_answer_began_is_still_counted():
+    """Only the wait for the answer times out, so a slow connect under load isn't taken for the hang-up, and the call
+    is waited for until the relay has counted it."""
     async def exercise(client, root, endpoint):
         endpoint.hold_headers = asyncio.Event()
         with pytest.raises(httpx.ReadTimeout):
-            await client.post(f"{root}/v1/chat/completions", json={}, timeout=0.3)
+            await client.post(f"{root}/v1/chat/completions", json={}, timeout=httpx.Timeout(10, read=0.3))
         endpoint.hold_headers.set()
-        await asyncio.sleep(0.3)
+        async with asyncio.timeout(10):
+            while not endpoint.calls.answered:
+                await asyncio.sleep(0.02)
 
     _, calls, _ = _through_relay([(200, CLAUDE_STREAM, "text/event-stream")], exercise)
 

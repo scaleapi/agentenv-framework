@@ -22,6 +22,7 @@ shared with other agents), which forwards each call to `$LITELLM_BASE_URL/v1/cha
   `[model.headers]` names;
 - the task's `effort` as `reasoning_effort` (`xhigh` and `max` as `high`) and its images, which the SDK has no setting
   for, recorded by the message they came with so the turns after carry them too;
+- `stream_options.include_usage` on a streamed call, which the harness never asks for, so the stream ends on its usage;
 - the env's time in the harness's "The current local time is" line while the agent follows an armed clock (below).
 
 The relay counts each call from the answer's usage, every subagent's included, so the task's `Usage` is their sum; the
@@ -34,14 +35,15 @@ The rest of each task's config:
 - every registered MCP server, the task's `peer_agents` tools included, as a streamable-HTTP server. Its
   `AgentEnv-Role` header is the role its registration names, unless the task has a role of its own;
 - every tool call allowed (`policy.allow_all()`), autonomous behaviour, `ask_question` and `generate_image` off, and the
-  SDK's own retries of a model call the endpoint answers with a transient error: six, from 5 s, doubling.
+  SDK's own retries of a model call the endpoint answers with a transient error: six, from 5 s, doubling. A call it
+  refuses (400, 401, 403) ends the task, an infra error with the SDK's reason.
 
 | Extension | Implementation |
 |---|---|
 | `agent-config/v1` | `AntigravityConfig`: `model`, `effort`, `system_prompt`, `project_id`, `task_id`, `timeout_seconds` (1800 by default; past it the task fails with `timeout`), `max_turns` (the model calls a task may make, the SDK's `max_model_calls`; a task stopped at it fails with `max_turns_exceeded`), `builtin_tools`, `web_tools` (below) |
 | `mcp-config/v1` | SDK default; each server passed to the task's harness. One that fails to start fails the task with `mcp_load_failed`, an infra error |
 | `skill-config/v1` | inline and bundle skills installed as `$ANTIGRAVITY_HOME/skills/<name>/`, the harness's skills path; an inline `SKILL.md` without frontmatter gets one from the skill's name and description, since the SDK lists a skill by its frontmatter alone |
-| `trajectory/v1` | the SDK's streamed steps, a step's text and thought each as one record, and each tool call's result from the SDK's hooks after it, live while the task runs (format `antigravity-sdk/1`) |
+| `trajectory/v1` | the SDK's streamed steps, a step's text and thought each as one record, and each tool call's result from the SDK's hooks after it, live while the task runs (format `antigravity-sdk/1`); `atif/1` when the run prescribes it, a step per model call the relay forwarded with the call's model, time and usage and the chunks streamed for it, a sub-agent's calls, which run on after its `invoke_subagent` call returns, with what it streamed, under that call (`antigravity_atif.py`) |
 | `snapshot/v1` | `save` archives the context's conversation store with its own turns' env times and images, never another context's, and `/app`, once no task runs; `load` restores the store under its own id, which the SDK holds inside it, bound to the target context, and replaces `/app`'s contents; a conversation another context of the same agent holds is refused (409), since the two would share one history. Where `tar` is GNU tar, the changelog too: an incremental archive of its roots after each task, uploaded through the namespace grant, and applied in order; an increment is a whole task's changes, since the harness has no hook this agent can hold a task at |
 | `peer-agents/v1` | SDK default: the harness reaches the task's other agents through the SDK's `peer_agents` MCP tools |
 | `triggers/v1` | SDK default |

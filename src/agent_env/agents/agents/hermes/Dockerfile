@@ -22,7 +22,7 @@ RUN set -eu; \
 WORKDIR /opt/agent
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
-COPY a2a_server.py hermes_bridge.py hermes_kit.py entrypoint.sh ./
+COPY a2a_server.py hermes_atif.py hermes_bridge.py hermes_kit.py entrypoint.sh ./
 COPY agentenv_plugin ./agentenv_plugin
 RUN chmod 0755 entrypoint.sh
 # Each context's Hermes profile is under /data/.hermes, Hermes' home, whatever the uid: Modal runs the image as root.

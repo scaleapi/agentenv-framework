@@ -1,0 +1,195 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-antigravity-coding",
+ "agent": {
+  "name": "Antigravity",
+  "version": "1.0.0",
+  "model_name": "gemini-2.5-flash"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:59:12.878836Z",
+   "source": "user",
+   "message": "Create hello.py that prints the sum of the integers 1 to 100, run it with python3, and reply with only the number it prints.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-antigravity-coding",
+     "task_id": "c6e0df03-fa93-4dc8-b796-fcaaffbaa6d5",
+     "message_id": "2ce01905b68f46a4babdd6ff27a88e59",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:59:14.682Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:59:15.945Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "776149fe0db66d5ab57ac7d61f21b3ca:2",
+     "function_name": "edit_file",
+     "arguments": {
+      "file_path": "/app/hello.py"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "776149fe0db66d5ab57ac7d61f21b3ca:2",
+      "content": "Create hello.py",
+      "extra": {
+       "agentenv": {
+        "arrived": {
+         "step_id": 5
+        }
+       }
+      }
+     }
+    ]
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:59:16.912Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "776149fe0db66d5ab57ac7d61f21b3ca:3",
+     "function_name": "run_command",
+     "arguments": {
+      "command_line": "python3 hello.py",
+      "working_dir": "/app"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "776149fe0db66d5ab57ac7d61f21b3ca:3",
+      "content": "{\"output\": \"5050\\r\\n\"}"
+     }
+    ]
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-28T06:59:17.674Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "5050",
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-28T06:59:17.977267Z",
+   "source": "user",
+   "message": "Now change it to sum 1 to 1000, run it again, and reply with only the number.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-antigravity-coding",
+     "task_id": "a9f90b11-5c1e-4dc9-99b5-c6e36cf34933",
+     "message_id": "5d26635be75349d580e3a6267ddc4e12",
+     "turn": 1
+    }
+   }
+  },
+  {
+   "step_id": 7,
+   "timestamp": "2026-11-28T06:59:19.527Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "776149fe0db66d5ab57ac7d61f21b3ca:6",
+     "function_name": "edit_file",
+     "arguments": {
+      "file_path": "/app/hello.py"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "776149fe0db66d5ab57ac7d61f21b3ca:6",
+      "content": "{\"summary\": \"Update sum range\"}"
+     }
+    ]
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 8,
+   "timestamp": "2026-11-28T06:59:20.632Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "776149fe0db66d5ab57ac7d61f21b3ca:7",
+     "function_name": "run_command",
+     "arguments": {
+      "command_line": "python3 hello.py",
+      "working_dir": "/app"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "776149fe0db66d5ab57ac7d61f21b3ca:7",
+      "content": "{\"output\": \"500500\\r\\n\"}"
+     }
+    ]
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 9,
+   "timestamp": "2026-11-28T06:59:21.330Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "500500",
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_steps": 9
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "antigravity-sdk/1",
+   "adapter": {
+    "name": "antigravity-sdk-atif",
+    "version": "0.2.0"
+   }
+  }
+ }
+}

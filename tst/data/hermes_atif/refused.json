@@ -1,0 +1,91 @@
+{
+ "scenario": "refused",
+ "cli": "(2026.9.24)",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-hermes-refused",
+    "task_id": "0e513a5e-a218-4fef-9848-240927ad362e",
+    "message_id": "ca8c8042685d45969bd27510e237c9e0",
+    "agent_name": "Hermes Agent",
+    "agent_version": "1.0.0",
+    "agent_model": "anthropic/claude-haiku-4-5",
+    "started_at": "2026-11-28T06:56:21.616415Z",
+    "inbound": [
+     "Reply with ok."
+    ],
+    "state": "failed",
+    "final": [
+     "custom rejected this request as malformed, so the model didn't answer. Start a clean session with /new or switch models with /model; if it keeps happening, run `hermes doctor`.\n\nProvider said: HTTP 400: refused by the recording proxy"
+    ],
+    "ended_at": "2026-11-28T06:56:28.377922Z",
+    "data": [
+     {
+      "data": {
+       "error_type": "cli_error",
+       "error_message": "{'type': 'BadRequestError', 'message': \"Error code: 400 - {'error': {'message': 'refused by the recording proxy', 'code': 400}}\"}",
+       "error_code": "400"
+      }
+     }
+    ],
+    "error": {
+     "kind": "agent_error",
+     "message": "{'type': 'BadRequestError', 'message': \"Error code: 400 - {'error': {'message': 'refused by the recording proxy', 'code': 400}}\"}",
+     "code": "400"
+    }
+   },
+   "native": [
+    {
+     "type": "on_session_start",
+     "timestamp": 1795848987910,
+     "session_id": "20261128_065627_c4abd6",
+     "model": "anthropic/claude-haiku-4-5"
+    },
+    {
+     "type": "api_request_error",
+     "timestamp": 1795848988164,
+     "session_id": "20261128_065627_c4abd6",
+     "turn_id": "20261128_065627_c4abd6:4963ef58-8f57-47de-baf7-52127dcfdbe9:33e957e0",
+     "api_request_id": "20261128_065627_c4abd6:4963ef58-8f57-47de-baf7-52127dcfdbe9:33e957e0:api:1",
+     "api_call_count": 1,
+     "retry_count": 0,
+     "model": "anthropic/claude-haiku-4-5",
+     "started_at": 1795848987.9774768,
+     "status_code": 400,
+     "reason": "format_error",
+     "retryable": false,
+     "error": {
+      "type": "BadRequestError",
+      "message": "Error code: 400 - {'error': {'message': 'refused by the recording proxy', 'code': 400}}"
+     }
+    }
+   ],
+   "aux": [
+    {
+     "name": "turn",
+     "record": {
+      "type": "start",
+      "effort": null
+     },
+     "after": 0
+    },
+    {
+     "name": "turn",
+     "record": {
+      "type": "end",
+      "cost_usd": null
+     },
+     "after": 2
+    }
+   ],
+   "usage": {
+    "tool_call_count": 0,
+    "provider_details": {
+     "api_calls": 1,
+     "unreported_calls": 1
+    }
+   }
+  }
+ ]
+}

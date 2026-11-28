@@ -1,0 +1,371 @@
+{
+ "scenario": "subagents",
+ "cli": "1.17.18",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-opencode-subagents",
+    "task_id": "af9b4b69-5624-4c6c-8782-4b2963057c85",
+    "message_id": "26e31f56757147f181bc87a43ebc7950",
+    "agent_name": "OpenCode",
+    "agent_version": "1.0.0",
+    "agent_model": "anthropic/claude-haiku-4-5",
+    "started_at": "2026-11-28T06:55:19.503292Z",
+    "inbound": [
+     "In one response, call your task tool twice, so two general sub-agents run at once: one runs `echo one`, the other `echo two`, each reporting its output back. Then reply with both outputs on one line."
+    ],
+    "state": "completed",
+    "final": [
+     "one two"
+    ],
+    "ended_at": "2026-11-28T06:55:26.257227Z"
+   },
+   "native": [
+    {
+     "type": "step_start",
+     "timestamp": 1795848922403,
+     "sessionID": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+     "part": {
+      "id": "prt_220efe51c001maYJbF9ig0wrsn",
+      "messageID": "msg_220efe0690017TLeZ03nln2Aty",
+      "sessionID": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+      "type": "step-start"
+     }
+    },
+    {
+     "type": "tool_use",
+     "timestamp": 1795848924917,
+     "sessionID": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+     "part": {
+      "type": "tool",
+      "tool": "task",
+      "callID": "toolu_vrtx_01BrLy4VJgVagC1WpTMoBZZ1",
+      "state": {
+       "status": "completed",
+       "input": {
+        "description": "Run echo one",
+        "prompt": "Run the command `echo one` and report back the output.",
+        "subagent_type": "general"
+       },
+       "output": "<task id=\"ses_ddf101865ffe5jVoK7obiSkbA2\" state=\"completed\">\n<task_result>\nThe output is:\n\n```\none\n```\n</task_result>\n</task>",
+       "metadata": {
+        "parentSessionId": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+        "sessionId": "ses_ddf101865ffe5jVoK7obiSkbA2",
+        "model": {
+         "modelID": "anthropic/claude-haiku-4-5",
+         "providerID": "litellm"
+        },
+        "truncated": false
+       },
+       "title": "Run echo one",
+       "time": {
+        "start": 1795848923038,
+        "end": 1795848924874
+       }
+      },
+      "id": "prt_220efe520001NUHdmfJrAguWI0",
+      "sessionID": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+      "messageID": "msg_220efe0690017TLeZ03nln2Aty"
+     }
+    },
+    {
+     "type": "tool_use",
+     "timestamp": 1795848924972,
+     "sessionID": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+     "part": {
+      "type": "tool",
+      "tool": "task",
+      "callID": "toolu_vrtx_017gcyw4FPdsS4jfxfP9nLhg",
+      "state": {
+       "status": "completed",
+       "input": {
+        "description": "Run echo two",
+        "prompt": "Run the command `echo two` and report back the output.",
+        "subagent_type": "general"
+       },
+       "output": "<task id=\"ses_ddf1016bcffe6SczQJuFw9IbQY\" state=\"completed\">\n<task_result>\nThe output is `two`.\n</task_result>\n</task>",
+       "metadata": {
+        "parentSessionId": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+        "sessionId": "ses_ddf1016bcffe6SczQJuFw9IbQY",
+        "model": {
+         "modelID": "anthropic/claude-haiku-4-5",
+         "providerID": "litellm"
+        },
+        "truncated": false
+       },
+       "title": "Run echo two",
+       "time": {
+        "start": 1795848923462,
+        "end": 1795848924963
+       }
+      },
+      "id": "prt_220efe7b2001Mp3ue5rO3cuyVS",
+      "sessionID": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+      "messageID": "msg_220efe0690017TLeZ03nln2Aty"
+     }
+    },
+    {
+     "type": "step_finish",
+     "timestamp": 1795848924972,
+     "sessionID": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+     "part": {
+      "id": "prt_220efef24001jTLBe2J7apLYOG",
+      "reason": "tool-calls",
+      "messageID": "msg_220efe0690017TLeZ03nln2Aty",
+      "sessionID": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+      "type": "step-finish",
+      "tokens": {
+       "total": 9546,
+       "input": 9358,
+       "output": 188,
+       "reasoning": 0,
+       "cache": {
+        "write": 0,
+        "read": 0
+       }
+      },
+      "cost": 0
+     }
+    },
+    {
+     "type": "step_start",
+     "timestamp": 1795848926052,
+     "sessionID": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+     "part": {
+      "id": "prt_220eff253001LqcNjnqGDFVpYH",
+      "messageID": "msg_220efef29001L4rqfnNqSsDX16",
+      "sessionID": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+      "type": "step-start"
+     }
+    },
+    {
+     "type": "text",
+     "timestamp": 1795848926052,
+     "sessionID": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+     "part": {
+      "id": "prt_220eff28b001076h4vU5buLgBy",
+      "messageID": "msg_220efef29001L4rqfnNqSsDX16",
+      "sessionID": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+      "type": "text",
+      "text": "one two",
+      "time": {
+       "start": 1795848925835,
+       "end": 1795848925898
+      }
+     }
+    },
+    {
+     "type": "step_finish",
+     "timestamp": 1795848926052,
+     "sessionID": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+     "part": {
+      "id": "prt_220eff2cc001OkEsrybOadihxd",
+      "reason": "stop",
+      "messageID": "msg_220efef29001L4rqfnNqSsDX16",
+      "sessionID": "ses_ddf1021b7ffetbA4lPb3Kd72XF",
+      "type": "step-finish",
+      "tokens": {
+       "total": 9714,
+       "input": 354,
+       "output": 5,
+       "reasoning": 0,
+       "cache": {
+        "write": 0,
+        "read": 9355
+       }
+      },
+      "cost": 0
+     }
+    }
+   ],
+   "aux": [
+    {
+     "name": "turn",
+     "record": {
+      "type": "agentenv.turn",
+      "model": "anthropic/claude-haiku-4-5",
+      "effort": null
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 613,
+       "output_tokens": 8,
+       "total_tokens": 621,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 0,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:21.252Z",
+      "timestamp": "2026-11-28T06:55:21.857Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 9358,
+       "output_tokens": 188,
+       "total_tokens": 9546,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 9355,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:21.814Z",
+      "timestamp": "2026-11-28T06:55:23.405Z"
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 8404,
+       "output_tokens": 53,
+       "total_tokens": 8457,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 8401,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:23.091Z",
+      "timestamp": "2026-11-28T06:55:23.856Z"
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 8404,
+       "output_tokens": 53,
+       "total_tokens": 8457,
+       "cache_read_tokens": 8068,
+       "cache_write_tokens": 333,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:23.533Z",
+      "timestamp": "2026-11-28T06:55:24.218Z"
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 8471,
+       "output_tokens": 13,
+       "total_tokens": 8484,
+       "cache_read_tokens": 8401,
+       "cache_write_tokens": 64,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:24.172Z",
+      "timestamp": "2026-11-28T06:55:24.706Z"
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 8471,
+       "output_tokens": 9,
+       "total_tokens": 8480,
+       "cache_read_tokens": 8401,
+       "cache_write_tokens": 64,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:24.427Z",
+      "timestamp": "2026-11-28T06:55:24.953Z"
+     },
+     "after": 2
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 9709,
+       "output_tokens": 5,
+       "total_tokens": 9714,
+       "cache_read_tokens": 9355,
+       "cache_write_tokens": 347,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:25.285Z",
+      "timestamp": "2026-11-28T06:55:25.864Z"
+     },
+     "after": 4
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 53430,
+    "output_tokens": 329,
+    "total_tokens": 53759,
+    "cache_read_tokens": 34225,
+    "cache_write_tokens": 18564,
+    "cache_write_ttl_tokens": {
+     "5m": 18564
+    },
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "anthropic/claude-haiku-4-5",
+      "calls": 7,
+      "input_tokens": 53430,
+      "output_tokens": 329,
+      "cache_read_tokens": 34225,
+      "cache_write_tokens": 18564,
+      "input_includes_cache": true,
+      "cache_write_ttl_tokens": {
+       "5m": 18564
+      }
+     }
+    ],
+    "provider_details": {
+     "model_calls": 7
+    }
+   }
+  }
+ ]
+}

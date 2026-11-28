@@ -65,10 +65,11 @@ from starlette.routing import Route
 
 from changelog import ChangelogCapture, apply as apply_increment
 from peers import Peers
+from pi_atif import AUX, NATIVE_FORMAT, PiAtif, counted
 
 PI_VERSION = "1.1.0"
 PROVIDER = "agentenv"
-TRAJECTORY_FORMAT = "pi-json-events/v1"
+TRAJECTORY_FORMAT = NATIVE_FORMAT
 # JSON object of request-body fields every model call carries, set per registration (``put --env-var``)
 # for fields agent-env will not forward as ``model_params``, such as ``user``.
 MODEL_PARAMS_ENV = "PI_A2A_MODEL_PARAMS"
@@ -137,7 +138,6 @@ class PiConfig(AgentConfig):
 @dataclass
 class _Run:
     session_id: str | None = None
-    events: list[dict[str, Any]] = field(default_factory=list)
     assistant_messages: list[dict[str, Any]] = field(default_factory=list)
     # Each compaction's summary usage: pi makes that call outside the agent loop and reports it only here.
     summary_usages: list[dict[str, Any]] = field(default_factory=list)
@@ -246,7 +246,8 @@ async def _materialize(part: FilePart, index: int, directory: Path) -> Path:
     return destination
 
 
-def _record(run: _Run, event: dict[str, Any]) -> None:
+def _record(run: _Run, event: dict[str, Any]) -> bool:
+    """Keep what the turn's result reads from ``event``, and say whether the event goes in the trajectory."""
     kind = event.get("type")
     if kind == "session":
         run.session_id = event.get("id")
@@ -256,28 +257,29 @@ def _record(run: _Run, event: dict[str, Any]) -> None:
         run.tool_calls += 1
     elif kind == "compaction_end":
         run.summary_usages.append((event.get("result") or {}).get("usage") or {})
-    if kind not in _UNRECORDED_EVENTS:
-        run.events.append(event)
+    return kind not in _UNRECORDED_EVENTS
 
 
 def _usage(run: _Run) -> Usage:
     """The turn's usage, summed over its assistant messages and its compactions' summary calls, with ``input_tokens``
     counting the cache. A usage that is all zero got none from its endpoint, as a streamed Claude answer through a
-    LiteLLM proxy, or a compaction that ended without one, and is counted in ``unreported_calls`` instead of as nothing
-    used; a message pi ended with an error and no usage was a request the endpoint refused, and counts nothing."""
-    counted, cost, unreported = [], 0.0, 0
-    usages = [(message.get("usage") or {}, message.get("stopReason") == "error") for message in run.assistant_messages]
+    LiteLLM proxy, a stream cut off before its usage came, or a compaction that ended without one, and is counted in
+    ``unreported_calls`` instead of as nothing used; a message pi ended with an error, no usage and no content was a
+    request the endpoint refused, and counts nothing."""
+    counts, cost, unreported = [], 0.0, 0
+    usages = [(message.get("usage") or {}, message.get("stopReason") == "error" and not message.get("content"))
+              for message in run.assistant_messages]
     for usage, refused in usages + [(usage, False) for usage in run.summary_usages]:
-        counts = [int(usage.get(key) or 0) for key in ("input", "output", "cacheRead", "cacheWrite", "totalTokens")]
-        if not any(counts):
+        tokens = counted(usage)
+        if tokens is None:
             unreported += not refused
             continue
-        counted.append(_counted(*counts))
+        counts.append(tokens)
         cost += float((usage.get("cost") or {}).get("total") or 0)
     details = {"unreported_calls": unreported} if unreported else {}
-    if not counted:
+    if not counts:
         return Usage(tool_call_count=run.tool_calls, provider_details=details)
-    input_tokens, output_tokens, read, write, total, settled = (sum(column) for column in zip(*counted))
+    input_tokens, output_tokens, read, write, total, settled = (sum(column) for column in zip(*counts))
     return Usage(
         tool_call_count=run.tool_calls,
         input_tokens=input_tokens,
@@ -285,20 +287,34 @@ def _usage(run: _Run) -> Usage:
         total_tokens=total,
         cache_read_tokens=read,
         cache_write_tokens=write,
-        input_includes_cache=True if settled == len(counted) else None,
+        input_includes_cache=True if settled == len(counts) else None,
         cost_usd=cost or None,
         provider_details=details,
     )
 
 
-def _counted(input: int, output: int, read: int, write: int, total: int) -> tuple[int, ...]:
-    """A message's input counting its cache, its output, cache read, cache write and total, and 1 when its total
-    confirms which its input was, else 0. pi's ``input`` is the prompt less its cache reads and writes, and its total
-    counts them, so they're added back; a total of the input and output alone says the input already holds them. A
-    total that says neither keeps pi's rule, unconfirmed."""
-    if read + write == 0 or total == input + output:
-        return input, output, read, write, total, 1
-    return input + read + write, output, read, write, total, int(total == input + output + read + write)
+def _declared_tools(session: Path) -> list[dict[str, Any]]:
+    """The tools a pi session last offered its model, replayed from its system messages and its compactions'
+    checkpoints as pi replays them: a resumed session declares only the tools that changed."""
+    tools: dict[str, dict[str, Any]] = {}
+    for line in session.read_text().splitlines():
+        entry = json.loads(line)
+        if entry.get("type") == "compaction" and isinstance(entry.get("systemMessage"), dict):
+            tools.clear()
+            system = entry["systemMessage"]
+        elif entry.get("type") == "message" and (entry.get("message") or {}).get("role") == "system":
+            system = entry["message"]
+        else:
+            continue
+        for removed in system.get("toolsRemoved") or ():
+            tools.pop(removed.get("name"), None)
+        tools.update((added["name"], added) for added in system.get("toolsAdded") or ())
+    return list(tools.values())
+
+
+def _now() -> str:
+    """Now on the clock pi times its messages by, this container's own, in the form ATIF's builder writes."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _text(message: Mapping[str, Any]) -> str:
@@ -310,12 +326,7 @@ def _text(message: Mapping[str, Any]) -> str:
 
 def _result(run: _Run, returncode: int, stderr: str, session_id: str) -> TaskResult:
     last = run.assistant_messages[-1] if run.assistant_messages else None
-    builder = (
-        TaskResult.builder()
-        .session_ref(run.session_id or session_id)
-        .usage(_usage(run))
-        .native_trajectory(format=TRAJECTORY_FORMAT, payload=run.events)
-    )
+    builder = TaskResult.builder().session_ref(run.session_id or session_id).usage(_usage(run))
     stop_reason = last.get("stopReason") if last else None
     if last is not None and returncode == 0 and stop_reason not in ("error", "aborted"):
         return builder.succeeded().add_text(_text(last)).build()
@@ -397,8 +408,13 @@ def _unpack(archive: Path, directory: Path) -> None:
     config_description="Configure the pi runtime: model, effort, system prompt and tool allowlist.",
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, native=TRAJECTORY_FORMAT,
-               description="The pi JSON-mode event stream of a completed task."),
+        enable(
+            TRAJECTORY_V1,
+            live=True,
+            native=TRAJECTORY_FORMAT,
+            atif=PiAtif,
+            description="The pi JSON-mode event stream of a task, also while it runs; atif/1 when a run prescribes it.",
+        ),
         enable(
             SNAPSHOT_V1,
             description=(
@@ -506,6 +522,11 @@ class PiAgent(AgentEnvAgent):
             return TaskResult.failure("pi.attachment", f"could not read a file part: {exc}")
 
         session_id = request.session_ref or _session_id(request.context_id)
+        feed = request.trajectory.aux if request.trajectory.builds_atif else None
+        if feed is not None and request.trajectory.starts_document:
+            resumed = self._session_file(session_id)
+            if resumed is not None:
+                feed(AUX, {"type": "tools", "tools": _declared_tools(resumed)})
         argv = [
             *self.pi_command,
             "--mode", "json",
@@ -562,7 +583,10 @@ class PiAgent(AgentEnvAgent):
                         event = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    _record(run, event)
+                    if _record(run, event):
+                        request.trajectory.append(event)
+                    if feed is not None and event.get("type") == "compaction_start":
+                        feed(AUX, {"type": "compaction_start", "at": _now()})
                     if self.changelog is not None and _is_tool_result(event):
                         await self.changelog.capture(
                             self._session_file(session_id), context_id=request.context_id, session_id=session_id
@@ -580,7 +604,6 @@ class PiAgent(AgentEnvAgent):
                         .add_text("a changelog increment could not be uploaded")
                         .session_ref(run.session_id or session_id)
                         .usage(_usage(run))
-                        .native_trajectory(format=TRAJECTORY_FORMAT, payload=run.events)
                         .build()
                     )
         except TimeoutError:
@@ -593,7 +616,6 @@ class PiAgent(AgentEnvAgent):
                 .add_text(f"pi did not finish within {config.timeout_seconds}s")
                 .session_ref(run.session_id or session_id)
                 .usage(_usage(run))
-                .native_trajectory(format=TRAJECTORY_FORMAT, payload=run.events)
                 .build()
             )
         except BaseException:

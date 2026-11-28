@@ -1,0 +1,246 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-antigravity-subagent",
+ "agent": {
+  "name": "Antigravity",
+  "version": "1.0.0",
+  "model_name": "gemini-2.5-flash"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T07:00:02.052789Z",
+   "source": "user",
+   "message": "Use your invoke_subagent tool to have a subagent create notes.txt holding the word forty-two and report back, then run `cat notes.txt` yourself and reply with only what it prints.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-antigravity-subagent",
+     "task_id": "d0301bb3-ae79-4349-8e09-dba4268fb1d8",
+     "message_id": "d20f1b5bc7a44bbea1ec929cdbace418",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T07:00:04.519Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "ef97eaefe73ffc669b20a3556c295a5d:1",
+     "function_name": "invoke_subagent",
+     "arguments": {}
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "ef97eaefe73ffc669b20a3556c295a5d:1",
+      "content": "Subagent File Creation",
+      "subagent_trajectory_ref": [
+       {
+        "trajectory_id": "subagent-2"
+       }
+      ]
+     }
+    ]
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T07:00:05.890Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "ef97eaefe73ffc669b20a3556c295a5d:2",
+     "function_name": "run_command",
+     "arguments": {
+      "command_line": "cat notes.txt",
+      "working_dir": "/app"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "ef97eaefe73ffc669b20a3556c295a5d:2",
+      "content": "{\"output\": \"cat: notes.txt: No such file or directory\\r\\n\"}"
+     }
+    ]
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T07:00:07.393Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "ef97eaefe73ffc669b20a3556c295a5d:3",
+     "function_name": "edit_file",
+     "arguments": {
+      "file_path": "/app/notes.txt"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "ef97eaefe73ffc669b20a3556c295a5d:3",
+      "content": "Create notes.txt",
+      "extra": {
+       "agentenv": {
+        "arrived": {
+         "step_id": 7
+        }
+       }
+      }
+     }
+    ]
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-28T07:00:08.710Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "ef97eaefe73ffc669b20a3556c295a5d:4",
+     "function_name": "run_command",
+     "arguments": {
+      "command_line": "cat notes.txt",
+      "working_dir": "/app"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "ef97eaefe73ffc669b20a3556c295a5d:4",
+      "content": "{\"output\": \"forty-two\\r\\n\"}"
+     }
+    ]
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-28T07:00:10.056Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "forty-two",
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 7,
+   "timestamp": "2026-11-28T07:00:12.073Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "forty-two",
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 8,
+   "timestamp": "2026-11-28T07:00:12.124415Z",
+   "source": "agent",
+   "message": "forty-two\n\nTask complete. A file named [notes.txt](file:///app/notes.txt) has been created in the current directory with the content \"forty-two\".\n\nforty-two",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "subagent_trajectories": [
+  {
+   "schema_version": "ATIF-v1.8",
+   "trajectory_id": "subagent-2",
+   "agent": {
+    "name": "subagent-2",
+    "version": "unknown"
+   },
+   "steps": [
+    {
+     "step_id": 1,
+     "timestamp": "2026-11-28T07:00:06.349Z",
+     "source": "agent",
+     "model_name": "gemini-2.5-flash",
+     "message": "",
+     "tool_calls": [
+      {
+       "tool_call_id": "576eae4cd9534c6b55bb8a6a5f78927d:1",
+       "function_name": "edit_file",
+       "arguments": {
+        "file_path": "/app/notes.txt"
+       }
+      }
+     ],
+     "observation": {
+      "results": [
+       {
+        "source_call_id": "576eae4cd9534c6b55bb8a6a5f78927d:1",
+        "content": "File creation",
+        "extra": {
+         "agentenv": {
+          "arrived": {
+           "step_id": 4
+          }
+         }
+        }
+       }
+      ]
+     },
+     "llm_call_count": 1
+    },
+    {
+     "step_id": 2,
+     "timestamp": "2026-11-28T07:00:07.690Z",
+     "source": "agent",
+     "model_name": "gemini-2.5-flash",
+     "message": "",
+     "llm_call_count": 1
+    },
+    {
+     "step_id": 3,
+     "timestamp": "2026-11-28T07:00:09.587Z",
+     "source": "agent",
+     "model_name": "gemini-2.5-flash",
+     "message": "",
+     "llm_call_count": 1
+    },
+    {
+     "step_id": 4,
+     "timestamp": "2026-11-28T07:00:10.942Z",
+     "source": "agent",
+     "model_name": "gemini-2.5-flash",
+     "message": "Task complete. A file named [notes.txt](file:///app/notes.txt) has been created in the current directory with the content \"forty-two\".",
+     "llm_call_count": 1
+    }
+   ]
+  }
+ ],
+ "final_metrics": {
+  "total_steps": 8
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "antigravity-sdk/1",
+   "adapter": {
+    "name": "antigravity-sdk-atif",
+    "version": "0.2.0"
+   }
+  }
+ }
+}

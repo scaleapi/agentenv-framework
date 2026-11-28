@@ -1,0 +1,736 @@
+{
+ "scenario": "coding",
+ "cli": "0.34.26",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-letta-code-coding",
+    "task_id": "bbe2dad3-bf0e-4f49-849d-81ec1f2d6437",
+    "message_id": "32f52268ca2d4261bd6b53877c986e51",
+    "agent_name": "Letta Code",
+    "agent_version": "1.0.0",
+    "agent_model": "openai/gpt-4.1-mini",
+    "started_at": "2026-11-28T06:54:47.227598Z",
+    "inbound": [
+     "Create hello.py that prints the sum of the integers 1 to 100, run it with python3, and reply with only the number it prints."
+    ],
+    "state": "completed",
+    "final": [
+     "5050"
+    ],
+    "ended_at": "2026-11-28T06:54:55.228181Z"
+   },
+   "native": [
+    {
+     "type": "system",
+     "subtype": "init",
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "agent_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "conversation_id": "local-conv-1",
+     "model": "openai-compatible/openai/gpt-4.1-mini",
+     "tools": [
+      "Bash",
+      "Monitor",
+      "WatchPR",
+      "Wake",
+      "EnterWorktree",
+      "ExitWorktree",
+      "SetWorkingDirectory",
+      "Edit",
+      "TaskStop",
+      "Read",
+      "Skill",
+      "Memory",
+      "CodeMode",
+      "Workflow",
+      "Agent",
+      "SendAgentMessage",
+      "TaskCreate",
+      "TaskGet",
+      "TaskList",
+      "TaskUpdate",
+      "Write",
+      "mcp__peer_agents__peer_list",
+      "mcp__peer_agents__peer_get_card",
+      "mcp__peer_agents__peer_send_message",
+      "mcp__peer_agents__peer_start_task",
+      "mcp__peer_agents__peer_get_task",
+      "mcp__peer_agents__peer_cancel_task"
+     ],
+     "cwd": "/app",
+     "mcp_servers": [],
+     "permission_mode": "",
+     "slash_commands": [],
+     "memfs_enabled": true,
+     "skill_sources": [
+      "bundled",
+      "global",
+      "agent",
+      "project"
+     ],
+     "system_info_reminder_enabled": true,
+     "reflection_trigger": "step-count",
+     "reflection_step_count": 25,
+     "uuid": "init-agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "timestamp": "2026-11-28T06:54:50.526Z"
+    },
+    {
+     "type": "message",
+     "id": "letta-msg-2",
+     "date": "2026-11-28T06:54:52.594Z",
+     "agent_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "conversation_id": "local-conv-1",
+     "message_type": "usage_statistics",
+     "step_count": 1,
+     "prompt_tokens": 22865,
+     "completion_tokens": 32,
+     "total_tokens": 22897,
+     "cached_input_tokens": 0,
+     "cache_write_tokens": 0,
+     "reasoning_tokens": 0,
+     "context_tokens": 22897,
+     "run_id": "local-run-1",
+     "seq_id": 2,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "letta-msg-2",
+     "timestamp": "2026-11-28T06:54:52.594Z"
+    },
+    {
+     "type": "message",
+     "message_type": "stop_reason",
+     "stop_reason": "requires_approval",
+     "run_id": "local-run-1",
+     "seq_id": 3,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "6e2b3eb3-726f-4f0c-b16c-6f147d460985",
+     "timestamp": "2026-11-28T06:54:52.595Z"
+    },
+    {
+     "type": "message",
+     "message_type": "tool_call_message",
+     "id": "tool-call-call_Qhe1oelyBJWV9YNa6pGAUgT2",
+     "date": "2026-11-28T06:54:52.598Z",
+     "tool_call": {
+      "name": "Write",
+      "tool_call_id": "call_Qhe1oelyBJWV9YNa6pGAUgT2",
+      "arguments": "{\"file_path\":\"/app/hello.py\",\"content\":\"print(sum(range(1, 101)))\\n\"}"
+     },
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "tool-call-call_Qhe1oelyBJWV9YNa6pGAUgT2",
+     "timestamp": "2026-11-28T06:54:52.598Z"
+    },
+    {
+     "type": "message",
+     "message_type": "tool_return_message",
+     "id": "tool-return-call_Qhe1oelyBJWV9YNa6pGAUgT2",
+     "date": "2026-11-28T06:54:52.604Z",
+     "status": "success",
+     "tool_call_id": "call_Qhe1oelyBJWV9YNa6pGAUgT2",
+     "tool_return": "Successfully wrote 26 characters to /app/hello.py",
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "tool-return-call_Qhe1oelyBJWV9YNa6pGAUgT2",
+     "timestamp": "2026-11-28T06:54:52.604Z"
+    },
+    {
+     "type": "message",
+     "id": "letta-msg-4",
+     "date": "2026-11-28T06:54:54.067Z",
+     "agent_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "conversation_id": "local-conv-1",
+     "message_type": "usage_statistics",
+     "step_count": 1,
+     "prompt_tokens": 131,
+     "completion_tokens": 29,
+     "total_tokens": 22944,
+     "cached_input_tokens": 22784,
+     "cache_write_tokens": 0,
+     "reasoning_tokens": 0,
+     "context_tokens": 22944,
+     "run_id": "local-run-2",
+     "seq_id": 2,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "letta-msg-4",
+     "timestamp": "2026-11-28T06:54:54.067Z"
+    },
+    {
+     "type": "message",
+     "message_type": "stop_reason",
+     "stop_reason": "requires_approval",
+     "run_id": "local-run-2",
+     "seq_id": 3,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "e2e22bbb-8cb2-4f96-8800-f2b18a9dcaed",
+     "timestamp": "2026-11-28T06:54:54.067Z"
+    },
+    {
+     "type": "message",
+     "message_type": "tool_call_message",
+     "id": "tool-call-call_gpNnhQhON5H9BZI6dMCiJVdS",
+     "date": "2026-11-28T06:54:54.068Z",
+     "tool_call": {
+      "name": "Bash",
+      "tool_call_id": "call_gpNnhQhON5H9BZI6dMCiJVdS",
+      "arguments": "{\"command\":\"python3 /app/hello.py\",\"description\":\"Run hello.py with python3\"}"
+     },
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "tool-call-call_gpNnhQhON5H9BZI6dMCiJVdS",
+     "timestamp": "2026-11-28T06:54:54.068Z"
+    },
+    {
+     "type": "message",
+     "message_type": "tool_return_message",
+     "id": "tool-return-call_gpNnhQhON5H9BZI6dMCiJVdS",
+     "date": "2026-11-28T06:54:54.104Z",
+     "status": "success",
+     "tool_call_id": "call_gpNnhQhON5H9BZI6dMCiJVdS",
+     "tool_return": "5050\n",
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "tool-return-call_gpNnhQhON5H9BZI6dMCiJVdS",
+     "timestamp": "2026-11-28T06:54:54.104Z"
+    },
+    {
+     "type": "message",
+     "id": "ui-msg-6",
+     "date": "2026-11-28T06:54:55.035Z",
+     "agent_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "conversation_id": "local-conv-1",
+     "message_type": "assistant_message",
+     "content": [
+      {
+       "type": "text",
+       "text": "505"
+      }
+     ],
+     "run_id": "local-run-3",
+     "seq_id": 1,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "ui-msg-6",
+     "timestamp": "2026-11-28T06:54:55.036Z"
+    },
+    {
+     "type": "message",
+     "id": "ui-msg-6",
+     "date": "2026-11-28T06:54:55.036Z",
+     "agent_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "conversation_id": "local-conv-1",
+     "message_type": "assistant_message",
+     "content": [
+      {
+       "type": "text",
+       "text": "0"
+      }
+     ],
+     "run_id": "local-run-3",
+     "seq_id": 2,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "ui-msg-6",
+     "timestamp": "2026-11-28T06:54:55.037Z"
+    },
+    {
+     "type": "message",
+     "id": "letta-msg-7",
+     "date": "2026-11-28T06:54:55.055Z",
+     "agent_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "conversation_id": "local-conv-1",
+     "message_type": "usage_statistics",
+     "step_count": 1,
+     "prompt_tokens": 171,
+     "completion_tokens": 3,
+     "total_tokens": 22958,
+     "cached_input_tokens": 22784,
+     "cache_write_tokens": 0,
+     "reasoning_tokens": 0,
+     "context_tokens": 22958,
+     "run_id": "local-run-3",
+     "seq_id": 3,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "letta-msg-7",
+     "timestamp": "2026-11-28T06:54:55.055Z"
+    },
+    {
+     "type": "message",
+     "message_type": "stop_reason",
+     "stop_reason": "end_turn",
+     "run_id": "local-run-3",
+     "seq_id": 4,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "d3516663-048f-4423-8821-e3ba016947b5",
+     "timestamp": "2026-11-28T06:54:55.056Z"
+    },
+    {
+     "type": "result",
+     "subtype": "success",
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "duration_ms": 4630,
+     "duration_api_ms": 4416,
+     "num_turns": 3,
+     "result": "5050",
+     "agent_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "conversation_id": "local-conv-1",
+     "run_ids": [],
+     "usage": {
+      "prompt_tokens": 23167,
+      "completion_tokens": 64,
+      "total_tokens": 68799,
+      "step_count": 3,
+      "cached_input_tokens": 45568,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "context_tokens": 22958
+     },
+     "uuid": "result-agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "timestamp": "2026-11-28T06:54:55.077Z"
+    }
+   ],
+   "aux": [
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "openai/gpt-4.1-mini",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 22865,
+       "output_tokens": 32,
+       "total_tokens": 22897,
+       "cache_read_tokens": 0,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:54:50.610Z",
+      "timestamp": "2026-11-28T06:54:52.559Z"
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "openai/gpt-4.1-mini",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 22915,
+       "output_tokens": 29,
+       "total_tokens": 22944,
+       "cache_read_tokens": 22784,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:54:52.617Z",
+      "timestamp": "2026-11-28T06:54:54.066Z"
+     },
+     "after": 5
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "openai/gpt-4.1-mini",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 22955,
+       "output_tokens": 3,
+       "total_tokens": 22958,
+       "cache_read_tokens": 22784,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:54:54.116Z",
+      "timestamp": "2026-11-28T06:54:55.055Z"
+     },
+     "after": 11
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 68735,
+    "output_tokens": 64,
+    "total_tokens": 68799,
+    "cache_read_tokens": 45568,
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "openai/gpt-4.1-mini",
+      "calls": 3,
+      "input_tokens": 68735,
+      "output_tokens": 64,
+      "cache_read_tokens": 45568,
+      "input_includes_cache": true
+     }
+    ],
+    "provider_details": {
+     "model_calls": 3
+    }
+   }
+  },
+  {
+   "turn": {
+    "index": 1,
+    "context_id": "ctx-letta-code-coding",
+    "task_id": "c7a6b448-1707-4453-84e9-09b62e9376b2",
+    "message_id": "23717a3b167d47e8bd8ab9497e0984f5",
+    "agent_name": "Letta Code",
+    "agent_version": "1.0.0",
+    "agent_model": "openai/gpt-4.1-mini",
+    "started_at": "2026-11-28T06:54:55.264375Z",
+    "inbound": [
+     "Now change it to sum 1 to 1000, run it again, and reply with only the number."
+    ],
+    "state": "completed",
+    "final": [
+     "500500"
+    ],
+    "ended_at": "2026-11-28T06:55:02.934785Z"
+   },
+   "native": [
+    {
+     "type": "system",
+     "subtype": "init",
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "agent_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "conversation_id": "local-conv-1",
+     "model": "openai-compatible/openai/gpt-4.1-mini",
+     "tools": [
+      "Bash",
+      "Monitor",
+      "WatchPR",
+      "Wake",
+      "EnterWorktree",
+      "ExitWorktree",
+      "SetWorkingDirectory",
+      "Edit",
+      "TaskStop",
+      "Read",
+      "Skill",
+      "Memory",
+      "CodeMode",
+      "Workflow",
+      "Agent",
+      "SendAgentMessage",
+      "TaskCreate",
+      "TaskGet",
+      "TaskList",
+      "TaskUpdate",
+      "Write",
+      "mcp__peer_agents__peer_list",
+      "mcp__peer_agents__peer_get_card",
+      "mcp__peer_agents__peer_send_message",
+      "mcp__peer_agents__peer_start_task",
+      "mcp__peer_agents__peer_get_task",
+      "mcp__peer_agents__peer_cancel_task"
+     ],
+     "cwd": "/app",
+     "mcp_servers": [],
+     "permission_mode": "",
+     "slash_commands": [],
+     "memfs_enabled": true,
+     "skill_sources": [
+      "bundled",
+      "global",
+      "agent",
+      "project"
+     ],
+     "system_info_reminder_enabled": true,
+     "reflection_trigger": "step-count",
+     "reflection_step_count": 25,
+     "uuid": "init-agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "timestamp": "2026-11-28T06:54:57.659Z"
+    },
+    {
+     "type": "message",
+     "id": "letta-msg-2",
+     "date": "2026-11-28T06:54:59.623Z",
+     "agent_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "conversation_id": "local-conv-1",
+     "message_type": "usage_statistics",
+     "step_count": 1,
+     "prompt_tokens": 18541,
+     "completion_tokens": 33,
+     "total_tokens": 23822,
+     "cached_input_tokens": 5248,
+     "cache_write_tokens": 0,
+     "reasoning_tokens": 0,
+     "context_tokens": 23822,
+     "run_id": "local-run-1",
+     "seq_id": 2,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "letta-msg-2",
+     "timestamp": "2026-11-28T06:54:59.623Z"
+    },
+    {
+     "type": "message",
+     "message_type": "stop_reason",
+     "stop_reason": "requires_approval",
+     "run_id": "local-run-1",
+     "seq_id": 3,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "36efb68c-f771-4e46-8d42-e44e239e6b9f",
+     "timestamp": "2026-11-28T06:54:59.624Z"
+    },
+    {
+     "type": "message",
+     "message_type": "tool_call_message",
+     "id": "tool-call-call_ax1akb20BNXA2YXqpfjGivYi",
+     "date": "2026-11-28T06:54:59.627Z",
+     "tool_call": {
+      "name": "Write",
+      "tool_call_id": "call_ax1akb20BNXA2YXqpfjGivYi",
+      "arguments": "{\"file_path\":\"/app/hello.py\",\"content\":\"print(sum(range(1, 1001)))\\n\"}"
+     },
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "tool-call-call_ax1akb20BNXA2YXqpfjGivYi",
+     "timestamp": "2026-11-28T06:54:59.627Z"
+    },
+    {
+     "type": "message",
+     "message_type": "tool_return_message",
+     "id": "tool-return-call_ax1akb20BNXA2YXqpfjGivYi",
+     "date": "2026-11-28T06:54:59.633Z",
+     "status": "success",
+     "tool_call_id": "call_ax1akb20BNXA2YXqpfjGivYi",
+     "tool_return": "Successfully wrote 27 characters to /app/hello.py",
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "tool-return-call_ax1akb20BNXA2YXqpfjGivYi",
+     "timestamp": "2026-11-28T06:54:59.633Z"
+    },
+    {
+     "type": "message",
+     "id": "letta-msg-4",
+     "date": "2026-11-28T06:55:00.939Z",
+     "agent_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "conversation_id": "local-conv-1",
+     "message_type": "usage_statistics",
+     "step_count": 1,
+     "prompt_tokens": 747,
+     "completion_tokens": 29,
+     "total_tokens": 23560,
+     "cached_input_tokens": 22784,
+     "cache_write_tokens": 0,
+     "reasoning_tokens": 0,
+     "context_tokens": 23560,
+     "run_id": "local-run-2",
+     "seq_id": 2,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "letta-msg-4",
+     "timestamp": "2026-11-28T06:55:00.939Z"
+    },
+    {
+     "type": "message",
+     "message_type": "stop_reason",
+     "stop_reason": "requires_approval",
+     "run_id": "local-run-2",
+     "seq_id": 3,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "53fdcfc8-90e5-4248-8912-bd014cc633bd",
+     "timestamp": "2026-11-28T06:55:00.940Z"
+    },
+    {
+     "type": "message",
+     "message_type": "tool_call_message",
+     "id": "tool-call-call_0MKCGurVjRnZS1IiAxCOGnqp",
+     "date": "2026-11-28T06:55:00.941Z",
+     "tool_call": {
+      "name": "Bash",
+      "tool_call_id": "call_0MKCGurVjRnZS1IiAxCOGnqp",
+      "arguments": "{\"command\":\"python3 /app/hello.py\",\"description\":\"Run hello.py with python3\"}"
+     },
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "tool-call-call_0MKCGurVjRnZS1IiAxCOGnqp",
+     "timestamp": "2026-11-28T06:55:00.941Z"
+    },
+    {
+     "type": "message",
+     "message_type": "tool_return_message",
+     "id": "tool-return-call_0MKCGurVjRnZS1IiAxCOGnqp",
+     "date": "2026-11-28T06:55:00.972Z",
+     "status": "success",
+     "tool_call_id": "call_0MKCGurVjRnZS1IiAxCOGnqp",
+     "tool_return": "500500\n",
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "tool-return-call_0MKCGurVjRnZS1IiAxCOGnqp",
+     "timestamp": "2026-11-28T06:55:00.972Z"
+    },
+    {
+     "type": "message",
+     "id": "ui-msg-12",
+     "date": "2026-11-28T06:55:02.745Z",
+     "agent_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "conversation_id": "local-conv-1",
+     "message_type": "assistant_message",
+     "content": [
+      {
+       "type": "text",
+       "text": "500"
+      }
+     ],
+     "run_id": "local-run-3",
+     "seq_id": 1,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "ui-msg-12",
+     "timestamp": "2026-11-28T06:55:02.746Z"
+    },
+    {
+     "type": "message",
+     "id": "ui-msg-12",
+     "date": "2026-11-28T06:55:02.746Z",
+     "agent_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "conversation_id": "local-conv-1",
+     "message_type": "assistant_message",
+     "content": [
+      {
+       "type": "text",
+       "text": "500"
+      }
+     ],
+     "run_id": "local-run-3",
+     "seq_id": 2,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "ui-msg-12",
+     "timestamp": "2026-11-28T06:55:02.747Z"
+    },
+    {
+     "type": "message",
+     "id": "letta-msg-7",
+     "date": "2026-11-28T06:55:02.754Z",
+     "agent_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "conversation_id": "local-conv-1",
+     "message_type": "usage_statistics",
+     "step_count": 1,
+     "prompt_tokens": 147,
+     "completion_tokens": 3,
+     "total_tokens": 23574,
+     "cached_input_tokens": 23424,
+     "cache_write_tokens": 0,
+     "reasoning_tokens": 0,
+     "context_tokens": 23574,
+     "run_id": "local-run-3",
+     "seq_id": 3,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "letta-msg-7",
+     "timestamp": "2026-11-28T06:55:02.754Z"
+    },
+    {
+     "type": "message",
+     "message_type": "stop_reason",
+     "stop_reason": "end_turn",
+     "run_id": "local-run-3",
+     "seq_id": 4,
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "uuid": "f79a4062-9e2c-4d22-a127-04c103991f0c",
+     "timestamp": "2026-11-28T06:55:02.755Z"
+    },
+    {
+     "type": "result",
+     "subtype": "success",
+     "session_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "duration_ms": 5183,
+     "duration_api_ms": 4965,
+     "num_turns": 3,
+     "result": "500500",
+     "agent_id": "agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "conversation_id": "local-conv-1",
+     "run_ids": [],
+     "usage": {
+      "prompt_tokens": 19435,
+      "completion_tokens": 65,
+      "total_tokens": 70956,
+      "step_count": 3,
+      "cached_input_tokens": 51456,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "context_tokens": 23574
+     },
+     "uuid": "result-agent-local-07b3b274-5fc1-4774-8710-07f98ef6d31a",
+     "timestamp": "2026-11-28T06:55:02.773Z"
+    }
+   ],
+   "aux": [
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "openai/gpt-4.1-mini",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 23789,
+       "output_tokens": 33,
+       "total_tokens": 23822,
+       "cache_read_tokens": 5248,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:54:57.759Z",
+      "timestamp": "2026-11-28T06:54:59.584Z"
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "openai/gpt-4.1-mini",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 23531,
+       "output_tokens": 29,
+       "total_tokens": 23560,
+       "cache_read_tokens": 22784,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:54:59.644Z",
+      "timestamp": "2026-11-28T06:55:00.939Z"
+     },
+     "after": 5
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "openai/gpt-4.1-mini",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 23571,
+       "output_tokens": 3,
+       "total_tokens": 23574,
+       "cache_read_tokens": 23424,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:00.982Z",
+      "timestamp": "2026-11-28T06:55:02.754Z"
+     },
+     "after": 11
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 70891,
+    "output_tokens": 65,
+    "total_tokens": 70956,
+    "cache_read_tokens": 51456,
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "openai/gpt-4.1-mini",
+      "calls": 3,
+      "input_tokens": 70891,
+      "output_tokens": 65,
+      "cache_read_tokens": 51456,
+      "input_includes_cache": true
+     }
+    ],
+    "provider_details": {
+     "model_calls": 3
+    }
+   }
+  }
+ ]
+}

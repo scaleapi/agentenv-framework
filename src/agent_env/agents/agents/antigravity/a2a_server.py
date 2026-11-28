@@ -3,8 +3,8 @@
 Built on agentenv-protocol's `AgentEnvAgent`: the framework serves the Agent Card, the A2A task lifecycle and the
 SDK-owned extensions (agent-config, mcp-config, skill listing, task trajectories, peer agents, triggers). Each turn is
 one `Agent.chat()` of the Antigravity SDK in this process (`antigravity_bridge`), whose streamed chunks are appended to
-the framework's trajectory log as they come. A context's first turn starts an SDK conversation, which later turns
-resume by its id.
+the framework's trajectory log as they come; a task that builds an atif/1 copy (`antigravity_atif`) is fed its model
+calls too. A context's first turn starts an SDK conversation, which later turns resume by its id.
 """
 from __future__ import annotations
 
@@ -66,6 +66,7 @@ from pydantic import Field
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 
+from antigravity_atif import AntigravityAtif
 from antigravity_bridge import (
     CONVERSATION_RECORDS,
     ENV_TIMES,
@@ -268,7 +269,7 @@ _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install
     config=AntigravityConfig,
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT),
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT, atif=AntigravityAtif),
         enable(ATTRIBUTION_PROBE_V1),
         enable(
             INSTALL_V1,
@@ -342,6 +343,7 @@ class AntigravityAgent(DurableSessionRefs, AgentEnvAgent):
                         max_turns=request.config.max_turns,
                         workspace=str(WORKSPACE_DIR),
                         event_callback=request.trajectory.append,
+                        aux_callback=request.trajectory.aux if request.trajectory.builds_atif else None,
                     )
                 except Exception:
                     logger.exception("Antigravity invocation failed")

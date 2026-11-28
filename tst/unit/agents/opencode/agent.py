@@ -16,6 +16,7 @@ IMPORTED = [str(AGENT_DIR), str(sent(AGENT_DIR, "agent_clock/agent_egress.py").p
             str(sent(AGENT_DIR, "clock/clockpage.py").parent), str(sent(AGENT_DIR, "model_relay/model_relay.py").parent)]
 PYTHONPATH = os.pathsep.join(IMPORTED)
 sys.path[:0] = IMPORTED
+opencode_atif = importlib.import_module("opencode_atif")
 opencode_bridge = importlib.import_module("opencode_bridge")
 opencode_date = importlib.import_module("opencode_date")
 opencode_kit = importlib.import_module("opencode_kit")

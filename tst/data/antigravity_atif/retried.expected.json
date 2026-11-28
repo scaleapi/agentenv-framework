@@ -1,0 +1,135 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-antigravity-retried",
+ "agent": {
+  "name": "Antigravity",
+  "version": "1.0.0",
+  "model_name": "gemini-2.5-flash"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:59:38.504104Z",
+   "source": "user",
+   "message": "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-antigravity-retried",
+     "task_id": "7fb25213-0488-474c-b942-f95bf2059aa6",
+     "message_id": "57bd584d7c414e5aa2b5fb0456fed26f",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:59:39.933Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "7f5b8ec5a4e0839e5f268232f98b2fa1:1",
+     "function_name": "run_command",
+     "arguments": {
+      "command_line": "echo first",
+      "working_dir": "/app"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "7f5b8ec5a4e0839e5f268232f98b2fa1:1",
+      "content": "{\"output\": \"first\\r\\n\"}"
+     }
+    ]
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:59:39.948Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "the endpoint refused the call (HTTP 503)"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:59:44.955Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "the endpoint refused the call (HTTP 503)"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-28T06:59:55.950Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "7f5b8ec5a4e0839e5f268232f98b2fa1:4",
+     "function_name": "run_command",
+     "arguments": {
+      "command_line": "echo second",
+      "working_dir": "/app"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "7f5b8ec5a4e0839e5f268232f98b2fa1:4",
+      "content": "{\"output\": \"second\\r\\n\"}"
+     }
+    ]
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-28T06:59:57.712Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "first second",
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_steps": 6
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "antigravity-sdk/1",
+   "adapter": {
+    "name": "antigravity-sdk-atif",
+    "version": "0.2.0"
+   }
+  }
+ }
+}

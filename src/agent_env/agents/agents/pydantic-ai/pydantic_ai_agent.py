@@ -55,6 +55,8 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from pydantic_ai_atif import PydanticAIAtif, counted
+
 PYDANTIC_AI_VERSION: Final[str] = "2.61.0"
 TRAJECTORY_FORMAT: Final[str] = "pydantic-ai-messages/v1"
 # The model when agent-config sets none, as for a peer that other agents message directly.
@@ -157,6 +159,8 @@ class Turn:
     on_event: Callable[[dict[str, Any]], None]
     # What a run that was cancelled had spent by then.
     on_usage: Callable[[Usage], None]
+    # Feeds the atif/1 copy's aux files, set only while the task builds one.
+    on_aux: Callable[[str, dict[str, Any]], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,37 +172,25 @@ class Outcome:
 
 
 def turn_usage(responses: Iterable[Any], *, tool_calls: int, requests: int) -> Usage:
-    """A turn's usage from the usage Pydantic AI kept of each model response (its ``RequestUsage``), with
-    ``input_tokens`` counting the cache. Pydantic AI reads its cache counts from OpenAI's ``prompt_tokens_details``,
-    whose prompt counts them; a LiteLLM proxy's Claude answers send Anthropic's ``cache_read_input_tokens`` and
-    ``cache_creation_input_tokens`` beside a prompt that doesn't, which Pydantic AI keeps in ``details``. Those are
-    added when the prompt is smaller than them, and leave the turn's flag unknown otherwise, since the counts can't say.
-    A response that kept no usage at all, as a streamed Claude answer through that proxy, is counted in
-    ``unreported_calls`` instead of as nothing used."""
+    """A turn's usage from the usage Pydantic AI kept of each model response (its ``RequestUsage``), each counted as
+    the atif/1 copy counts its step (``pydantic_ai_atif.counted``), so the steps sum to it. A response that kept no
+    usage at all, as a streamed Claude answer through a LiteLLM proxy, is counted in ``unreported_calls`` instead of as
+    nothing used."""
     calls, unreported = [], 0
     for usage in responses:
-        if not (usage.input_tokens or usage.output_tokens):
+        counts = counted(usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, usage.cache_write_tokens,
+                         usage.details or {})
+        if counts is None:
             unreported += 1
-            continue
-        details = usage.details or {}
-        if usage.cache_read_tokens or usage.cache_write_tokens:
-            read, write, counts_cache = usage.cache_read_tokens, usage.cache_write_tokens, True
         else:
-            read = details.get("cache_read_input_tokens", 0)
-            write = details.get("cache_creation_input_tokens", 0)
-            counts_cache = None
-        calls.append(_counted(usage.input_tokens, usage.output_tokens, read, write, counts_cache))
+            calls.append(counts)
     return _summed(calls, tool_calls, {"requests": requests, **({"unreported_calls": unreported} if unreported else {})})
 
 
-def _counted(prompt: int, output: int, read: int, write: int, counts_cache: bool | None) -> tuple[int, ...]:
-    """A call's input counting its cache, its output, cache read, cache write, and 1 when whether its prompt held the
-    cache is known (said so, ``counts_cache``; nothing cached; or a prompt smaller than the cache), else 0."""
-    if counts_cache or read + write == 0:
-        return prompt, output, read, write, 1
-    if prompt < read + write:
-        return prompt + read + write, output, read, write, 1
-    return prompt, output, read, write, 0
+def effort_sent(effort: str | None, profile: Mapping[str, Any]) -> str | None:
+    """The effort a model's requests carry: Pydantic AI passes its ``thinking`` setting on only to a model whose profile
+    takes it (``Model._thinking_applies``) and drops it otherwise, as for Claude through an OpenAI-compatible endpoint."""
+    return effort if profile.get("supports_thinking") or profile.get("thinking_always_enabled") else None
 
 
 def _summed(calls: list[tuple[int, ...]], tool_calls: int, details: dict[str, Any]) -> Usage:
@@ -393,8 +385,8 @@ def _stage_conversation(
     lifespan=_turns_stop_with_the_server,
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT,
-               description="The task's Pydantic AI messages, also while it runs."),
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT, atif=PydanticAIAtif,
+               description="The task's Pydantic AI messages, also while it runs; atif/1 when the run prescribes it."),
         enable(
             SNAPSHOT_V1,
             description=(
@@ -465,6 +457,12 @@ class PydanticAIAgent(AgentEnvAgent):
             with suppress(RuntimeError):
                 request.trajectory.append(event)
 
+        def on_aux(name: str, record: dict[str, Any]) -> None:
+            with suppress(RuntimeError):
+                request.trajectory.aux(name, record)
+
+        builds_atif = request.trajectory.builds_atif
+
         conversation = conversation_id(request.context_id)
         # Bound before the run starts, so a live trajectory read or a mid-turn snapshot finds the conversation.
         self.set_session_ref_for_context(request.context_id, conversation)
@@ -489,6 +487,7 @@ class PydanticAIAgent(AgentEnvAgent):
                         endpoint=self.endpoint,
                         on_event=on_event,
                         on_usage=spent.append,
+                        on_aux=on_aux if builds_atif else None,
                     ))
             except TimeoutError:
                 message = f"Pydantic AI did not finish within {config.timeout_seconds}s"

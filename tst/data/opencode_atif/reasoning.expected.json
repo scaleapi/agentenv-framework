@@ -1,0 +1,89 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-opencode-reasoning",
+ "agent": {
+  "name": "OpenCode",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:55:42.486572Z",
+   "source": "user",
+   "message": "Think it through, then reply with only the answer: how many positive integers below 1000 are divisible by 3 or 5 but not by 15?",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-opencode-reasoning",
+     "task_id": "8b81c4fd-fefb-44bb-91f9-c554c5433fbf",
+     "message_id": "159e66b8c73e47278ce7f2a3750ca5e8",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:55:44.816Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "reasoning_effort": "high",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 603,
+    "cached_tokens": 0,
+    "completion_tokens": 24,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:55:44.969Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "reasoning_effort": "high",
+   "message": "I need to find positive integers below 1000 that are divisible by 3 or 5, but not by 15.\n\nLet me break this down:\n- Divisible by 3: floor(999/3) = 333 numbers\n- Divisible by 5: floor(999/5) = 199 numbers\n- Divisible by both 3 and 5 (i.e., divisible by 15): floor(999/15) = 66 numbers\n\nUsing inclusion-exclusion:\n- Numbers divisible by 3 or 5: 333 + 199 - 66 = 466\n\nBut I need to exclude those divisible by 15:\n- Numbers divisible by 3 or 5, but NOT by 15: 466 - 66 = 400\n\n**400**",
+   "metrics": {
+    "prompt_tokens": 9348,
+    "cached_tokens": 8988,
+    "completion_tokens": 195,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 357
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 9951,
+  "total_completion_tokens": 219,
+  "total_cached_tokens": 8988,
+  "total_steps": 3,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 357
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "opencode-events/1",
+   "adapter": {
+    "name": "opencode-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

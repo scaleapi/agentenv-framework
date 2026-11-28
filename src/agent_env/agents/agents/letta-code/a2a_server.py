@@ -65,6 +65,7 @@ from pydantic import Field, field_validator
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 
+from letta_code_atif import LettaCodeAtif
 from letta_code_bridge import (
     ERROR_MESSAGE_LIMIT,
     commit_staged_session,
@@ -289,7 +290,14 @@ _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install
     config=LettaCodeConfig,
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT),
+        enable(
+            TRAJECTORY_V1,
+            live=True,
+            native=TRAJECTORY_FORMAT,
+            atif=LettaCodeAtif,
+            description="Retrieve a task's Letta Code stream-json trajectory, also while it runs; atif/1 when the run "
+                        "prescribes it.",
+        ),
         enable(ATTRIBUTION_PROBE_V1),
         enable(
             INSTALL_V1,
@@ -363,6 +371,7 @@ class LettaCodeAgent(DurableSessionRefs, AgentEnvAgent):
                     attachment_paths=attachments,
                     event_callback=record,
                     workspace=str(WORKSPACE_DIR),
+                    aux_callback=request.trajectory.aux if request.trajectory.builds_atif else None,
                 )
             except Exception:
                 logger.exception("Letta Code invocation failed")

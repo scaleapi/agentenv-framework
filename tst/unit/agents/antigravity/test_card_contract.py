@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tst.unit.agents.antigravity.agent import AGENT_DIR, PYTHONPATH, a2a_server, antigravity_bridge
+from tst.unit.agents.antigravity.agent import AGENT_DIR, PYTHONPATH, a2a_server, antigravity_atif, antigravity_bridge
 from tst.unit.agents.antigravity.conftest import Harness
 
 _ENDPOINT = ["litellm_api_key", "litellm_base_url", "litellm_extra_headers", "trust_env"]
@@ -43,7 +43,7 @@ def test_the_extensions_are_the_agents_and_the_attribution_probe(ag):
     assert _methods(ag.card) == {
         "urn:agentenv:agent-config/v1": ["get", "set"],
         "urn:agentenv:mcp-config/v1": ["add", "list"],
-        "urn:agentenv:trajectory/v1": ["get"],
+        "urn:agentenv:trajectory/v1": ["get", "media", "prescribe"],
         "urn:agentenv:attribution-probe/v1": ["probe"],
         "urn:agentenv:install/v1": [],
         "urn:agentenv:peer-agents/v1": ["list", "set"],
@@ -54,11 +54,13 @@ def test_the_extensions_are_the_agents_and_the_attribution_probe(ag):
     }
 
 
-def test_the_trajectory_is_the_sdks_native_steps_served_live(ag):
+def test_the_trajectory_is_the_sdks_native_steps_served_live_and_atif_beside_them(ag):
     (trajectory,) = [ext for ext in ag.card["capabilities"]["extensions"]
                      if ext["uri"] == "urn:agentenv:trajectory/v1"]
 
-    assert trajectory["params"]["native"] == a2a_server.TRAJECTORY_FORMAT == "antigravity-sdk/1"
+    assert trajectory["params"]["native"] == trajectory["params"]["default"] == a2a_server.TRAJECTORY_FORMAT \
+        == antigravity_atif.NATIVE_FORMAT == "antigravity-sdk/1"
+    assert trajectory["params"]["formats"] == ["antigravity-sdk/1", "atif/1"]
 
 
 @pytest.mark.parametrize("gnu, changelog", [(True, True), (False, False)])

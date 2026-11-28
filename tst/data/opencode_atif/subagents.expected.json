@@ -1,0 +1,209 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-opencode-subagents",
+ "agent": {
+  "name": "OpenCode",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:55:19.503292Z",
+   "source": "user",
+   "message": "In one response, call your task tool twice, so two general sub-agents run at once: one runs `echo one`, the other `echo two`, each reporting its output back. Then reply with both outputs on one line.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-opencode-subagents",
+     "task_id": "af9b4b69-5624-4c6c-8782-4b2963057c85",
+     "message_id": "26e31f56757147f181bc87a43ebc7950",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:55:21.857Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 613,
+    "cached_tokens": 0,
+    "completion_tokens": 8,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:55:23.856Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 8404,
+    "cached_tokens": 0,
+    "completion_tokens": 53,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 8401
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:55:24.218Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 8404,
+    "cached_tokens": 8068,
+    "completion_tokens": 53,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 333
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-28T06:55:24.706Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 8471,
+    "cached_tokens": 8401,
+    "completion_tokens": 13,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 64
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-28T06:55:24.953Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 8471,
+    "cached_tokens": 8401,
+    "completion_tokens": 9,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 64
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 7,
+   "timestamp": "2026-11-28T06:55:22.403Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01BrLy4VJgVagC1WpTMoBZZ1",
+     "function_name": "task",
+     "arguments": {
+      "description": "Run echo one",
+      "prompt": "Run the command `echo one` and report back the output.",
+      "subagent_type": "general"
+     }
+    },
+    {
+     "tool_call_id": "toolu_vrtx_017gcyw4FPdsS4jfxfP9nLhg",
+     "function_name": "task",
+     "arguments": {
+      "description": "Run echo two",
+      "prompt": "Run the command `echo two` and report back the output.",
+      "subagent_type": "general"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01BrLy4VJgVagC1WpTMoBZZ1",
+      "content": "<task id=\"ses_ddf101865ffe5jVoK7obiSkbA2\" state=\"completed\">\n<task_result>\nThe output is:\n\n```\none\n```\n</task_result>\n</task>"
+     },
+     {
+      "source_call_id": "toolu_vrtx_017gcyw4FPdsS4jfxfP9nLhg",
+      "content": "<task id=\"ses_ddf1016bcffe6SczQJuFw9IbQY\" state=\"completed\">\n<task_result>\nThe output is `two`.\n</task_result>\n</task>"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 9358,
+    "cached_tokens": 0,
+    "completion_tokens": 188,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 9355
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 8,
+   "timestamp": "2026-11-28T06:55:26.052Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "one two",
+   "metrics": {
+    "prompt_tokens": 9709,
+    "cached_tokens": 9355,
+    "completion_tokens": 5,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 347
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 53430,
+  "total_completion_tokens": 329,
+  "total_cached_tokens": 34225,
+  "total_steps": 8,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 18564
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "opencode-events/1",
+   "adapter": {
+    "name": "opencode-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

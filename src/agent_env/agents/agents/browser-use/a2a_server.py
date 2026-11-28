@@ -21,10 +21,13 @@ from agentenv_protocol.a2a_agent import (
     TaskRequest,
     TaskResult,
     TextPart,
+    TrajectoryLog,
     Usage,
     a2a_agent,
     enable,
 )
+
+from browser_use_atif import BrowserUseAtif
 
 HERE = Path(__file__).parent
 HOME = Path(os.environ.get("BROWSER_USE_A2A_HOME", Path.home() / ".browser-use-a2a"))
@@ -67,8 +70,8 @@ class BrowserUseConfig(AgentConfig):
     extensions=(
         MCP_CONFIG_V1,
         CDP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=False, native=TRAJECTORY_FORMAT,
-               description="browser-use's messages, each turn's when it ends."),
+        enable(TRAJECTORY_V1, live=False, native=TRAJECTORY_FORMAT, atif=BrowserUseAtif,
+               description="browser-use's messages, each turn's when it ends; atif/1 when the run prescribes it."),
     ),
 )
 class BrowserUseAgent(AgentEnvAgent):
@@ -104,6 +107,8 @@ class BrowserUseAgent(AgentEnvAgent):
             "workspace": str(workspace),
             # A history holds the model's signed thinking, which another model refuses, so a model change starts anew.
             "historyFile": str(HOME / "sessions" / f"{session}-{hashlib.sha256(model.encode()).hexdigest()[:8]}.json"),
+            # What only the atif/1 copy reads, which agent.py keeps for a turn that builds one.
+            "atif": request.trajectory.builds_atif,
         }
         (HOME / "sessions").mkdir(parents=True, exist_ok=True)
         request.trajectory.set_format(TRAJECTORY_FORMAT)
@@ -143,6 +148,8 @@ class BrowserUseAgent(AgentEnvAgent):
         if result is None:
             error = (await stderr).decode(errors="replace")[-4000:] or f"agent.py exited {process.returncode}"
             return TaskResult.failure("browser_use.crashed", error, error_type="infra_error")
+        if request.trajectory.builds_atif:
+            _feed_atif(request.trajectory, result, config.effort)
         tool_calls = 0
         for index, message in enumerate(result["messages"]):
             request.trajectory.append(message)
@@ -159,6 +166,26 @@ class BrowserUseAgent(AgentEnvAgent):
             .usage(_usage(result, tool_calls))
             .build()
         )
+
+
+def _feed_atif(trajectory: TrajectoryLog, result: dict, effort: str | None) -> None:
+    """What the atif/1 adapter reads beside the messages, fed before them: the turn (its run's id, which the run's own
+    messages carry, how it ended, its answer and cost), and what agent.py kept that the messages don't hold, the
+    screenshots only of the run's own calls: its first requests prune the earlier turn's last ones, which that turn's
+    copy holds already."""
+    messages, kept = result["messages"], result["atif"]
+    run = messages[-1].get("run_id") if messages else None
+    trajectory.aux("turn", {"run_id": run, "status": result["status"], "text": result["text"], "model": result["model"],
+                            "effort": effort, "cost_usd": result.get("cost_usd")})
+    for attempt in kept["attempts"]:
+        trajectory.aux("attempt", attempt)
+    for summary in kept["summaries"]:
+        trajectory.aux("summary", summary)
+    returned = {part.get("tool_call_id") for message in messages if message.get("run_id") == run
+                for part in message.get("parts") or () if part.get("part_kind") == "tool-return"}
+    for call_id, images in kept["images"].items():
+        if call_id in returned:
+            trajectory.aux("images", {"tool_call_id": call_id, "images": images})
 
 
 def _usage(result: dict, tool_calls: int) -> Usage:

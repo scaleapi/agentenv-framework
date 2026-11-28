@@ -1,0 +1,145 @@
+{
+ "scenario": "refused",
+ "cli": "2.61.0",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-pydantic-ai-refused",
+    "task_id": "d8acad85-28e7-495c-a7a8-40e9b9ced84e",
+    "message_id": "dc13884b4d9149c3bbf43d4c33575002",
+    "agent_name": "Pydantic AI",
+    "agent_version": "2.61.0",
+    "agent_model": "anthropic/claude-haiku-4-5",
+    "started_at": "2026-11-28T06:54:46.943784Z",
+    "inbound": [
+     "Reply with ok."
+    ],
+    "state": "failed",
+    "final": [
+     "The model endpoint answered 400: {'message': 'refused by the recording proxy', 'code': 400}"
+    ],
+    "ended_at": "2026-11-28T06:54:47.288187Z",
+    "error": {
+     "kind": "infra_error",
+     "message": "The model endpoint answered 400: {'message': 'refused by the recording proxy', 'code': 400}",
+     "code": "pydantic_ai.model_http_400"
+    }
+   },
+   "native": [],
+   "aux": [
+    {
+     "name": "turn",
+     "record": {
+      "effort": null
+     },
+     "after": 0
+    },
+    {
+     "name": "failed",
+     "record": {
+      "messages": [
+       {
+        "parts": [
+         {
+          "content": [
+           "Reply with ok."
+          ],
+          "timestamp": "2026-11-28T06:54:47.187846Z",
+          "part_kind": "user-prompt"
+         },
+         {
+          "instructions": [
+           {
+            "id": "capability:coder_instructions",
+            "dynamic": false,
+            "content_hash": "a623d0fbe34d037ea313d6edef2804a6c9a49a7eb5d40ee39321553ca002cc40",
+            "part_kind": "instruction-digest"
+           },
+           {
+            "id": "capability:sub_agents",
+            "dynamic": false,
+            "content_hash": "1a01e4b94fc3197bebe8981055a448129712e9be7dfe5f8f26edc841fcc5f433",
+            "part_kind": "instruction-digest"
+           },
+           {
+            "id": "capability:coder_instructions",
+            "dynamic": true,
+            "content_hash": "aa4d848ad03e5f4e6fa6f212568e28df41d60e6f165dfea60c7e233d6a9153cf",
+            "part_kind": "instruction-digest"
+           },
+           {
+            "content": "",
+            "dynamic": true,
+            "on_change": "append",
+            "name": null,
+            "id": "capability:repo_context",
+            "part_kind": "instruction"
+           }
+          ],
+          "part_kind": "instruction-baseline"
+         }
+        ],
+        "timestamp": "2026-11-28T06:54:47.188763Z",
+        "instructions": "You are a software engineering agent. Use tools to investigate, implement, and\nverify the requested work. Read existing code and follow repository instructions\nand conventions. Prefer focused changes that fix causes, not symptoms.\n\nApply DRY, YAGNI, SOLID, and the Zen of Python pragmatically: simple, explicit,\ncohesive code beats abstractions without a present need.\n\nWork autonomously until complete. Ask only for missing requirements, credentials,\nconsequential ambiguity, or approval for irreversible actions. Use reasonable\ndefaults for minor ambiguities. Run focused tests and appropriate lint/type checks;\nreport what you actually verified, assumptions, and remaining limitations.\n\nLeave only the requested change in the project. Check behavior with inline shell\nscripts (e.g. a heredoc) rather than new files, add tests only where the project\nalready has them, and delete any scratch files you created before finishing.\n\nFinish required long-running work before responding: do other useful work, then\npoll status and output until complete or blocked. Servers may remain running once\nreadiness is verified; shut them down when no longer needed.\n\nYou can delegate self-contained tasks to these sub-agents using the `delegate_task` tool. Each runs in its own fresh context and does not see this conversation, so pass everything it needs.\n\nAvailable sub-agents:\n- self: A fresh run of this same agent, with all of your tools, instructions, and capabilities. Use it to hand off a self-contained part of the work.\n\nYour project is `/workspace`. Shell commands start there, and relative file paths resolve from it.",
+        "kind": "request",
+        "run_id": "01a220ef-5b4a-77ce-8e2b-c8898ed0406d",
+        "conversation_id": "01a220ef-5b4b-7178-80a3-c8d5c96240b8",
+        "metadata": null,
+        "state": "complete"
+       },
+       {
+        "parts": [],
+        "usage": {
+         "input_tokens": 0,
+         "cache_write_tokens": 0,
+         "cache_write_1h_tokens": 0,
+         "cache_read_tokens": 0,
+         "output_tokens": 0,
+         "output_reasoning_tokens": 0,
+         "input_audio_tokens": 0,
+         "cache_audio_read_tokens": 0,
+         "output_audio_tokens": 0,
+         "audio_seconds": 0.0,
+         "details": {},
+         "cost": null
+        },
+        "model_name": "",
+        "timestamp": "2026-11-28T06:54:47.286123Z",
+        "kind": "response",
+        "provider_name": null,
+        "provider_url": null,
+        "provider_details": null,
+        "provider_response_id": null,
+        "finish_reason": null,
+        "run_id": "01a220ef-5b4a-77ce-8e2b-c8898ed0406d",
+        "conversation_id": "01a220ef-5b4b-7178-80a3-c8d5c96240b8",
+        "metadata": null,
+        "workspace_ref": {
+         "provider": "local",
+         "id": "/workspace"
+        },
+        "history_digest": null,
+        "failed_attempts": null,
+        "state": "interrupted"
+       }
+      ],
+      "at": "2026-11-28T06:54:47.287675+00:00",
+      "error": {
+       "kind": "infra_error",
+       "code": "pydantic_ai.model_http_400",
+       "message": "The model endpoint answered 400: {'message': 'refused by the recording proxy', 'code': 400}"
+      }
+     },
+     "after": 0
+    }
+   ],
+   "usage": {
+    "tool_call_count": 0,
+    "provider_details": {
+     "requests": 0
+    }
+   }
+  }
+ ]
+}

@@ -1,0 +1,174 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-opencode-retried",
+ "agent": {
+  "name": "OpenCode",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:54:53.227934Z",
+   "source": "user",
+   "message": "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-opencode-retried",
+     "task_id": "36e87c71-655e-4e56-a579-2c47371edf8b",
+     "message_id": "1672343d33fb4f11b06b20db897e7e2d",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:54:55.134Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "the endpoint refused the call (HTTP 503)",
+      "code": "503"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:54:55.354Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 594,
+    "cached_tokens": 0,
+    "completion_tokens": 7,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:54:57.263Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "the endpoint refused the call (HTTP 503)",
+      "code": "503"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-28T06:55:02.422Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "I'll run those two commands for you.",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01Xq2dWUDsUJzoqwUmNzEnm7",
+     "function_name": "bash",
+     "arguments": {
+      "command": "echo first"
+     }
+    },
+    {
+     "tool_call_id": "toolu_vrtx_01Ek6CjGWEeotHYsq123VH2T",
+     "function_name": "bash",
+     "arguments": {
+      "command": "echo second"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01Xq2dWUDsUJzoqwUmNzEnm7",
+      "content": "first\n"
+     },
+     {
+      "source_call_id": "toolu_vrtx_01Ek6CjGWEeotHYsq123VH2T",
+      "content": "second\n"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 9339,
+    "cached_tokens": 0,
+    "completion_tokens": 97,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 9336
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-28T06:55:03.230Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "Both outputs on one line: `first` and `second`",
+   "metrics": {
+    "prompt_tokens": 9499,
+    "cached_tokens": 9336,
+    "completion_tokens": 16,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 156
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 7,
+   "timestamp": "2026-11-28T06:55:03.318807Z",
+   "source": "agent",
+   "message": "I'll run those two commands for you.\nBoth outputs on one line: `first` and `second`",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 19432,
+  "total_completion_tokens": 120,
+  "total_cached_tokens": 9336,
+  "total_steps": 7,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 9492
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "opencode-events/1",
+   "adapter": {
+    "name": "opencode-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

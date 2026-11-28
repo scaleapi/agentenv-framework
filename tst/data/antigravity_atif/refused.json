@@ -1,0 +1,62 @@
+{
+ "scenario": "refused",
+ "cli": "0.1.24",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-antigravity-refused",
+    "task_id": "bedf7ca0-bab0-4e47-ac5c-230e7940869d",
+    "message_id": "255b1f762f604c2982d2b0cdc2a8e0da",
+    "agent_name": "Antigravity",
+    "agent_version": "1.0.0",
+    "agent_model": "gemini-2.5-flash",
+    "started_at": "2026-11-28T06:59:34.014241Z",
+    "inbound": [
+     "Reply with ok."
+    ],
+    "state": "failed",
+    "final": [
+     "Antigravity invocation failed"
+    ],
+    "ended_at": "2026-11-28T06:59:34.172396Z",
+    "error": {
+     "kind": "infra_error",
+     "message": "Antigravity invocation failed",
+     "code": "antigravity_invocation_error"
+    }
+   },
+   "native": [],
+   "aux": [
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 1,
+      "conversation": "d5a5f0642599c28f",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:34.149Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 400,
+      "outcome": "refused",
+      "started": "2026-11-28T06:59:34.148Z",
+      "timestamp": "2026-11-28T06:59:34.151Z",
+      "seq": 1
+     },
+     "after": 0
+    }
+   ],
+   "usage": null
+  }
+ ]
+}

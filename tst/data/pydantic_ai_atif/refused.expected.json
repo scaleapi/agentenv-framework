@@ -1,0 +1,55 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-pydantic-ai-refused",
+ "agent": {
+  "name": "Pydantic AI",
+  "version": "2.61.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:54:46.943784Z",
+   "source": "user",
+   "message": "Reply with ok.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-pydantic-ai-refused",
+     "task_id": "d8acad85-28e7-495c-a7a8-40e9b9ced84e",
+     "message_id": "dc13884b4d9149c3bbf43d4c33575002",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:54:47.287675Z",
+   "source": "agent",
+   "message": "The model endpoint answered 400: {'message': 'refused by the recording proxy', 'code': 400}",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "The model endpoint answered 400: {'message': 'refused by the recording proxy', 'code': 400}",
+      "code": "pydantic_ai.model_http_400"
+     },
+     "state": "failed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_steps": 2
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "pydantic-ai-messages/v1",
+   "adapter": {
+    "name": "pydantic-ai-messages-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

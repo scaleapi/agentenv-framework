@@ -1,0 +1,101 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-antigravity-browser",
+ "agent": {
+  "name": "Antigravity",
+  "version": "1.0.0",
+  "model_name": "gemini-2.5-flash"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:59:25.489831Z",
+   "source": "user",
+   "message": "Use the browser tools to open https://example.com, then call the screenshot tool with no filename so the image comes back to you, and reply with the main heading you see in it.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-antigravity-browser",
+     "task_id": "765d8bf6-ad4c-4417-b24f-5db7e6e0cae6",
+     "message_id": "971fe33d49c446da8ec0c79475fa67e6",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:59:27.185Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "ad99691771d250283484df83d9422c38:1",
+     "function_name": "browser_navigate",
+     "arguments": {
+      "url": "https://example.com"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "ad99691771d250283484df83d9422c38:1",
+      "content": "### Ran Playwright code\n```js\nawait page.goto('https://example.com');\n```\n### Page\n- Page URL: https://example.com/\n- Page Title: Example Domain\n### Snapshot\n- [Snapshot](../tmp/.playwright-mcp/page-2026-11-28T06-59-27-522Z.yml)"
+     }
+    ]
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:59:28.711Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "ad99691771d250283484df83d9422c38:2",
+     "function_name": "browser_take_screenshot",
+     "arguments": {
+      "fullPage": false
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "ad99691771d250283484df83d9422c38:2",
+      "content": "### Result\n- [Screenshot of viewport](../tmp/.playwright-mcp/page-2026-11-28T06-59-28-747Z.png)\n### Ran Playwright code\n```js\n// Screenshot viewport and save it as ../tmp/.playwright-mcp/page-2026-11-28T06-59-28-747Z.png\nawait page.screenshot({\n  fullPage: false,\n  path: '../tmp/.playwright-mcp/page-2026-11-28T06-59-28-747Z.png',\n  scale: 'css',\n  type: 'png'\n});\n```\n[Resource offloaded to file:///data/.gemini/antigravity/brain/ad99691771d250283484df83d9422c38/.system_generated/steps/4/media_0.png]"
+     }
+    ]
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:59:29.958Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "The main heading I see in the screenshot is \"Example Domain\".",
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_steps": 4
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "antigravity-sdk/1",
+   "adapter": {
+    "name": "antigravity-sdk-atif",
+    "version": "0.2.0"
+   }
+  }
+ }
+}

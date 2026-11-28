@@ -6,7 +6,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && python -m venv /opt/browser-use \
     && /opt/browser-use/bin/pip install --no-cache-dir -r browser-use-requirements.txt \
     && useradd --create-home agent
-COPY a2a_server.py agent.py ./
+COPY a2a_server.py agent.py browser_use_atif.py ./
 USER agent
 ENV ANONYMIZED_TELEMETRY=false BH_TELEMETRY=0
 EXPOSE 8000

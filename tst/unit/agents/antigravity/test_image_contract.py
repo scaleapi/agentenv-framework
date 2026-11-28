@@ -39,8 +39,8 @@ def test_every_file_the_image_copies_is_in_the_folder():
 
     assert copied and all(_in_context(name) for name in copied), copied
     # install.sh and run.sh are install/v1's: a build context pruned to what the Dockerfile reads keeps them so.
-    assert {"a2a_server.py", "antigravity_bridge.py", "antigravity_date.py", "antigravity_kit.py", "entrypoint.sh",
-            "install.sh", "run.sh", "requirements.txt"} <= set(copied)
+    assert {"a2a_server.py", "antigravity_atif.py", "antigravity_bridge.py", "antigravity_date.py", "antigravity_kit.py",
+            "entrypoint.sh", "install.sh", "run.sh", "requirements.txt"} <= set(copied)
 
 
 def _imported(path) -> set[str]:
@@ -67,7 +67,7 @@ def test_the_image_and_an_install_carry_every_module_the_server_imports():
     installed = set(re.search(r'^AGENT_FILES="([^"]+)"$', INSTALL_SH, re.MULTILINE).group(1).split())
 
     assert {"agent_clock/agent_egress.py", "clock/clockpage.py", "model_relay/model_relay.py",
-            "antigravity_date.py"} <= needed
+            "antigravity_date.py", "antigravity_atif.py"} <= needed
     assert needed <= set(_copied()) and needed <= installed, (needed, installed)
 
 
@@ -75,7 +75,7 @@ def test_the_requirements_are_the_protocol_floor_the_pinned_sdk_the_relays_http_
     requirements = [line for line in (AGENT_DIR / "requirements.txt").read_text().splitlines()
                     if line and not line.startswith("#")]
 
-    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.643",
+    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.670",
                             f"google-antigravity=={antigravity_bridge.SDK_VERSION}", "aiohttp>=3.9,<4", "certifi"]
     assert "pip install --no-cache-dir -r requirements.txt" in DOCKERFILE
     assert "-r app/requirements.txt" in INSTALL_SH

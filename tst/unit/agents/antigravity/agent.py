@@ -19,6 +19,7 @@ PYTHONPATH = os.pathsep.join(IMPORTED)
 sys.path[:0] = IMPORTED
 fake_sdk.install()
 antigravity_bridge = importlib.import_module("antigravity_bridge")
+antigravity_atif = importlib.import_module("antigravity_atif")
 antigravity_date = importlib.import_module("antigravity_date")
 antigravity_kit = importlib.import_module("antigravity_kit")
 agent_egress = importlib.import_module("agent_egress")

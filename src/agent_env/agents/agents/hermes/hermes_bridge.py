@@ -465,8 +465,9 @@ class _EventParser:
     Every event carries its hook's name as ``type``. ``pre_tool_call`` events are the turn's tool calls,
     ``post_llm_call`` carries the final answer, and the turn's events' ``session_id`` is the session: the turn is the
     one whose ``turn_id`` the first model call carries, as the turn calls the model before it can delegate, and another
-    turn's events are a delegate_task child's, whose model calls are counted apart. The whole event list is the
-    trajectory, and each event is handed to ``event_callback`` as it is parsed.
+    turn's events are a delegate_task child's, whose model calls are counted apart, and so are the auxiliary calls of
+    a session not the turn's. The whole event list is the trajectory, and each event is handed to ``event_callback``
+    as it is parsed.
     """
 
     def __init__(self, event_callback: Callable[[dict], None] | None = None) -> None:
@@ -506,6 +507,11 @@ class _EventParser:
         if kind == "post_api_request":
             self.all_calls.add(event.get("usage"), event.get("model"))
             if theirs:
+                self.side_calls.add(event.get("usage"), event.get("model"))
+        elif kind == "post_auxiliary_call" and not event.get("error"):
+            self.all_calls.add(event.get("usage"), event.get("model"))
+            # Hermes bills an auxiliary call to the session it ran in, so the usage file counts the turn's own.
+            if self.turn_id is not None and event.get("session_id") not in (None, "", self.session_id):
                 self.side_calls.add(event.get("usage"), event.get("model"))
         if kind == "pre_tool_call":
             self.tool_calls.add(str(event.get("tool_call_id") or f"tool-{len(self.tool_calls)}"))
