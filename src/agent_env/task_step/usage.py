@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NotRequired, Optional, TypedDict
 
-from agentenv_protocol.a2a_agent import Usage
+from agentenv_protocol.a2a_agent import Usage, ttl_sum
 
 from agent_env.config.model import ModelRole
 from agent_env.config.model_pricing import (
@@ -42,6 +42,7 @@ class CostFields(TypedDict):
     unit_prices: NotRequired[dict[str, float]]
     cost_assumed: NotRequired[list[str]]
     unpriced_reason: NotRequired[str]
+    cache_write_ttl_tokens: NotRequired[dict[str, int]]
 
 
 class ModelEntry(CostFields):
@@ -147,18 +148,25 @@ class RoleUsage:
         return entry
 
     def _by_model(self, counted: list[Usage], prices: PriceTable) -> list[tuple[ModelEntry, Cost]]:
-        """The turns' counts by model, each priced at its own model's rate: a turn's ``models``, and a turn without
-        them counted as the role's model's."""
+        """The turns' counts by model, each priced at its own model's rate: a turn's ``models``, and a turn without them
+        counted as the role's model's. A row says its own writes by how long they were kept, or takes them from its
+        turn (``_row_ttl``) when it doesn't, as an older agent's row may not."""
         shares: dict[Optional[str], list[Any]] = {}
+        charged: dict[Optional[str], list[dict[str, Any]]] = {}
         for usage in counted:
             if usage.models:
                 for share in usage.models:
                     shares.setdefault(share.model, []).append(share)
+                    record = share.to_dict()
+                    if share.cache_write_ttl_tokens is None and (ttl := _row_ttl(usage, share)) is not None:
+                        record["cache_write_ttl_tokens"] = ttl
+                    charged.setdefault(share.model, []).append(record)
             else:
                 shares.setdefault(self.model, []).append(usage)
+                charged.setdefault(self.model, []).append(usage.to_dict())
         rows = []
         for model, of in shares.items():
-            cost = _cost_of(_tokens(of), [share.cost_usd for share in of], model=model, prices=prices,
+            cost = _cost_of(_tokens(charged[model]), [share.cost_usd for share in of], model=model, prices=prices,
                             reported_by=self.reported_by)
             row = ModelEntry(model=model, **{name: _total(of, name) for name in _MODEL_COUNTS},
                              input_includes_cache=_agreed(of), **cost.fields())
@@ -173,10 +181,28 @@ def _total(records: Iterable[Any], name: str) -> Any:
 
 
 def _tokens(records: list[Any]) -> Optional[Tokens]:
-    """The records' tokens summed, each read by its own ``input_includes_cache``; None when one lacks its input or
-    output, so a sum that can't be charged in full isn't priced short."""
-    charged = [Tokens.of(record.to_dict()) for record in records]
+    """The records' tokens (each a ``Usage`` or its dict) summed, each read by its own ``input_includes_cache``; None
+    when one lacks its input or output, so a sum that can't be charged in full isn't priced short."""
+    charged = [Tokens.of(record if isinstance(record, dict) else record.to_dict()) for record in records]
     return reduce(operator.add, charged) if charged and None not in charged else None
+
+
+def _row_ttl(usage: Usage, share: Any) -> Optional[dict[str, int]]:
+    """The writes by time a per-model row that gives none takes from its turn: the turn's when it ran one model; all
+    the row's writes at one time when the turn kept every write that time; else None, since writes kept different
+    times can't be told apart by model."""
+    turn = {label: count for label, count in (usage.cache_write_ttl_tokens or {}).items() if count}
+    if not turn:
+        return None
+    if len(usage.models) == 1:
+        return turn
+    if len(turn) != 1:
+        return None
+    [(label, count)] = turn.items()
+    writes = usage.cache_write_tokens
+    if writes is None:
+        writes = sum(row.cache_write_tokens or 0 for row in usage.models)
+    return {label: share.cache_write_tokens or 0} if count >= writes else None
 
 
 def _agreed(records: list[Any]) -> Optional[bool]:
@@ -205,7 +231,8 @@ def _summed(costs: list[Cost], reported_usd: Optional[float]) -> Cost:
         return Cost(None, CostStatus.UNPRICED, None, reported_usd, unpriced=unpriced.unpriced)
     least = next((cost for cost in costs if cost.status is not CostStatus.PRICED), costs[0])
     assumed = tuple(dict.fromkeys(assumed for cost in costs for assumed in cost.assumed))
-    return Cost(sum(cost.usd for cost in costs), least.status, least.source, reported_usd, assumed=assumed)
+    return Cost(sum(cost.usd for cost in costs), least.status, least.source, reported_usd, assumed=assumed,
+                cache_write_ttl_tokens=ttl_sum(cost.cache_write_ttl_tokens for cost in costs))
 
 
 def _combined(costs: list[Cost]) -> Cost:
@@ -225,7 +252,8 @@ def _combined(costs: list[Cost]) -> Cost:
     return Cost(sum(c.usd for c in costed), status, sources.pop() if len(sources) == 1 else None,
                 sum(bills) if bills else None,
                 uncached_input=sum(uncached) if priced and None not in uncached else None,
-                unit_prices=next(iter(rates.values())) if len(rates) == 1 else None, assumed=assumed)
+                unit_prices=next(iter(rates.values())) if len(rates) == 1 else None, assumed=assumed,
+                cache_write_ttl_tokens=ttl_sum(c.cache_write_ttl_tokens for c in priced))
 
 
 def _unreported() -> Usage:

@@ -3,7 +3,8 @@ set, read back by ``from_dict`` from any protocol version, and carried by a fail
 
 import pytest
 
-from agentenv_protocol.a2a_agent.tasks.v1 import TaskResult, Usage
+from agentenv_protocol.a2a_agent import ttl_counts_in_seconds, ttl_label, ttl_seconds, ttl_sum
+from agentenv_protocol.a2a_agent.tasks.v1 import ModelUsage, TaskResult, Usage
 
 FULL = Usage(tool_call_count=2, input_tokens=120, output_tokens=7, total_tokens=127, cache_read_tokens=100,
              cache_write_tokens=20, input_includes_cache=True, cost_usd=0.01, provider_details={"model": "m"})
@@ -118,6 +119,14 @@ RESPONSES = {
                                      "cache_creation_input_tokens": 0, "cache_read_input_tokens": 7809},
                                     Usage(input_tokens=7818, output_tokens=5, total_tokens=7823,
                                           cache_read_tokens=7809, cache_write_tokens=0, input_includes_cache=True)),
+    "litellm-client-claude-writes-for-an-hour": (
+        {"prompt_tokens": 7822, "completion_tokens": 5, "total_tokens": 7827, "cache_creation_input_tokens": 7813,
+         "cache_read_input_tokens": 0,
+         "prompt_tokens_details": {"cached_tokens": 0, "cache_creation_tokens": 7813, "cache_creation_token_details": {
+             "ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 7813}}},
+        Usage(input_tokens=7822, output_tokens=5, total_tokens=7827, cache_read_tokens=0, cache_write_tokens=7813,
+              input_includes_cache=True,
+              provider_details={"cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 7813}})),
     "openai-gpt-reads": ({"prompt_tokens": 7822, "completion_tokens": 2, "total_tokens": 7824,
                           "prompt_tokens_details": {"audio_tokens": 0, "cached_tokens": 7680}},
                          Usage(input_tokens=7822, output_tokens=2, total_tokens=7824, cache_read_tokens=7680,
@@ -138,3 +147,46 @@ RESPONSES = {
 @pytest.mark.parametrize("response, expected", RESPONSES.values(), ids=RESPONSES.keys())
 def test_a_model_responses_usage_reads_with_input_counting_the_cache(response, expected):
     assert Usage.from_model_response(response) == expected
+
+
+def test_an_older_agents_split_in_provider_details_is_read_into_its_writes_by_time():
+    usage = Usage.from_dict({"input_tokens": 9, "output_tokens": 5, "cache_write_tokens": 50, "provider_details": {
+        "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 30},
+        "cache_write_tokens_details": {"ttl_12h_tokens": 20, "ttl_bad_tokens": 4, "ttl_30m_tokens": "x"}}})
+
+    assert usage.cache_write_ttl_tokens == {"1h": 30, "12h": 20}
+    assert Usage.from_dict(usage.to_dict()) == usage
+
+
+def test_writes_by_time_name_each_time_one_way_and_an_explicit_count_wins_over_the_split():
+    usage = Usage(cache_write_ttl_tokens={"60m": 5, "1h": 2, "90s": 1, "24h": 3},
+                  provider_details={"cache_creation": {"ephemeral_1h_input_tokens": 99}})
+
+    assert usage.cache_write_ttl_tokens == {"1h": 7, "90s": 1, "1d": 3}
+    assert (ttl_label(5400), ttl_label(43200), ttl_seconds("12h"), ttl_seconds("0m"), ttl_seconds("1w")) == (
+        "90m", "12h", 43200, None, None)
+
+
+@pytest.mark.parametrize("ttl", [{"1w": 5}, {"soon": 5}, {"1h": -1}, {"1h": True}, {"1h": 2.5}, ["1h"]],
+                         ids=["unit", "no-time", "negative", "bool", "float", "not-a-mapping"])
+def test_writes_by_time_that_name_no_time_or_hold_no_count_are_refused(ttl):
+    with pytest.raises((ValueError, TypeError)):
+        Usage.from_dict({"cache_write_ttl_tokens": ttl})
+
+
+def test_a_turn_without_writes_by_time_takes_its_rows_and_a_models_row_sums_its_calls():
+    rows = (ModelUsage(model="a", cache_write_tokens=5, cache_write_ttl_tokens={"1h": 5}),
+            ModelUsage(model="b", cache_write_tokens=2, cache_write_ttl_tokens={"5m": 2}))
+    calls = [Usage(cache_write_ttl_tokens={"1h": 3}), Usage(cache_write_ttl_tokens={"1h": 2, "5m": 1}), Usage()]
+
+    assert Usage(models=rows).cache_write_ttl_tokens == {"1h": 5, "5m": 2}
+    assert Usage(models=(rows[0], ModelUsage(model="c", cache_write_tokens=1))).cache_write_ttl_tokens is None
+    assert ModelUsage.of("a", calls).cache_write_ttl_tokens == {"1h": 5, "5m": 1}
+
+
+def test_writes_by_time_as_stored_are_read_by_seconds_leaving_out_what_cant_be_read():
+    stored = {"1h": 5, "60m": 2, "soon": 3, "2h": -1, "5m": True, "12h": 4}
+
+    assert ttl_counts_in_seconds(stored) == {3600: 7, 43200: 4}
+    assert ttl_counts_in_seconds(["1h"]) == {} == ttl_counts_in_seconds(None)
+    assert ttl_sum([{3600: 1}, None, {3600: 2, 300: 1}]) == {3600: 3, 300: 1} and ttl_sum([None]) is None

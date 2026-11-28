@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Awaitable, Iterable, Mapping
 from dataclasses import dataclass, field, fields
 from enum import Enum
@@ -364,14 +365,9 @@ class NativeTrajectory:
         object.__setattr__(self, "payload", _copy_json_value(self.payload))
 
 
-_USAGE_COUNTERS = (
-    "tool_call_count",
-    "input_tokens",
-    "output_tokens",
-    "total_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-)
+#: ``Usage``'s token counts, each an integer a turn's calls sum.
+TOKEN_COUNTS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens")
+_USAGE_COUNTERS = ("tool_call_count", *TOKEN_COUNTS)
 
 
 # The keys a model response's usage is read by, in any of the shapes ``Usage.from_model_response`` reads.
@@ -383,6 +379,86 @@ _RESPONSE_USAGE_KEYS = frozenset({
 
 def _count(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+#: The seconds in each unit a time a cache write was kept may be written in, however it's spelled.
+TTL_UNITS = {"s": 1, "sec": 1, "m": 60, "min": 60, "h": 3600, "hr": 3600, "hour": 3600, "d": 86400, "day": 86400}
+#: A pattern for any of ``TTL_UNITS``' spellings, the longest first so a pattern that ends there matches it whole.
+TTL_UNIT_PATTERN = "|".join(sorted(TTL_UNITS, key=len, reverse=True))
+# How long cache writes were kept, as ``cache_write_ttl_tokens`` names it: a count of one unit, ``5m``, ``1h``, ``90s``.
+_TTL_LABEL = re.compile(r"^(\d+)([smhd])$")
+# A provider's count of cache writes kept a while, named for the time: Anthropic's ``ephemeral_1h_input_tokens``,
+# OpenAI's ``ttl_12h_tokens``.
+_TTL_COUNT = re.compile(rf"^(?:ephemeral_|ttl_)?(\d+)({TTL_UNIT_PATTERN})(?:_input)?_tokens$")
+#: Where ``Usage.from_model_response`` keeps each provider's split of its cache writes by how long they were kept.
+CACHE_WRITE_SPLITS = ("cache_creation", "cache_write_tokens_details")
+
+
+_Time = TypeVar("_Time", str, int)
+
+
+def ttl_seconds(label: Any) -> int | None:
+    """The seconds a ``cache_write_ttl_tokens`` label names, ``1h`` as 3600; None for one that names no time."""
+    match = _TTL_LABEL.match(label) if isinstance(label, str) else None
+    return int(match[1]) * TTL_UNITS[match[2]] if match and int(match[1]) > 0 else None
+
+
+def ttl_label(seconds: int) -> str:
+    """A time as ``cache_write_ttl_tokens`` names it, in the largest unit it's a whole number of: ``1h``, ``90m``,
+    ``1d``, ``45s``."""
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds % size == 0:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+def _ttl_counts(value: Any) -> dict[str, int] | None:
+    """A ``cache_write_ttl_tokens`` value with each time named as ``ttl_label`` names it; raises for a key that names no
+    time or a count that isn't a non-negative integer."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("cache_write_ttl_tokens must map times to counts")
+    counts: dict[str, int] = {}
+    for label, count in value.items():
+        if (seconds := ttl_seconds(label)) is None:
+            raise ValueError(f"cache_write_ttl_tokens: {label!r} names no time, as 5m or 1h do")
+        if _count(count) is None:
+            raise ValueError(f"cache_write_ttl_tokens: {label}'s count must be a non-negative integer")
+        counts[ttl_label(seconds)] = counts.get(ttl_label(seconds), 0) + count
+    return counts
+
+
+def _ttl_from_splits(details: Mapping[str, Any]) -> dict[str, int] | None:
+    """The writes by time a provider's split in ``details`` (``CACHE_WRITE_SPLITS``) counts, by each count's name; a
+    count that isn't a positive integer is left out, and None when none is left."""
+    counts: dict[str, int] = {}
+    for name in CACHE_WRITE_SPLITS:
+        split = details.get(name)
+        for key, value in split.items() if isinstance(split, Mapping) else ():
+            if (match := _TTL_COUNT.match(str(key))) and (count := _count(value)):
+                label = ttl_label(int(match[1]) * TTL_UNITS[match[2]])
+                counts[label] = counts.get(label, 0) + count
+    return counts or None
+
+
+def ttl_sum(parts: Iterable[Mapping[_Time, int] | None]) -> dict[_Time, int] | None:
+    """Counts by how long cache writes were kept (``cache_write_ttl_tokens``, by label or by seconds) summed by time;
+    None when none of ``parts`` gives one."""
+    total: dict[_Time, int] = {}
+    for part in parts:
+        for time, count in (part or {}).items():
+            total[time] = total.get(time, 0) + count
+    return total or None
+
+
+def ttl_counts_in_seconds(value: Any) -> dict[int, int]:
+    """A ``cache_write_ttl_tokens`` value as stored, by seconds, each time that can't be read or count that isn't a
+    positive integer left out, as a reader of records another version wrote must take them."""
+    if not isinstance(value, Mapping):
+        return {}
+    return ttl_sum({seconds: count} for label, count in value.items()
+                   if (seconds := ttl_seconds(label)) is not None and _count(count)) or {}
 
 
 def _check_counts(record: Any, names: Iterable[str]) -> None:
@@ -414,11 +490,13 @@ class ModelUsage:
     cache_write_tokens: int | None = None
     input_includes_cache: bool | None = None
     cost_usd: float | None = None
+    cache_write_ttl_tokens: Mapping[str, int] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model:
             raise ValueError("a model's usage must name the model")
         _check_counts(self, _MODEL_COUNTERS)
+        object.__setattr__(self, "cache_write_ttl_tokens", _ttl_counts(self.cache_write_ttl_tokens))
 
     @classmethod
     def of(cls, model: str, usages: Iterable["Usage"]) -> "ModelUsage":
@@ -435,7 +513,8 @@ class ModelUsage:
         flags = {usage.input_includes_cache for usage in usages if usage.input_tokens is not None}
         return cls(model=model, calls=len(usages), **{name: total(name) for name in _MODEL_COUNTERS[1:]},
                    input_includes_cache=flags.pop() if len(flags) == 1 else None,
-                   cost_usd=sum(costs) if costs and None not in costs else None)
+                   cost_usd=sum(costs) if costs and None not in costs else None,
+                   cache_write_ttl_tokens=ttl_sum(usage.cache_write_ttl_tokens for usage in usages))
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ModelUsage":
@@ -445,7 +524,8 @@ class ModelUsage:
         return cls(**{f.name: data[f.name] for f in fields(cls) if data.get(f.name) is not None})
 
     def to_dict(self) -> dict[str, Any]:
-        return {f.name: value for f in fields(self) if (value := getattr(self, f.name)) is not None}
+        return {f.name: dict(value) if isinstance(value, Mapping) else value
+                for f in fields(self) if (value := getattr(self, f.name)) is not None}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -455,7 +535,11 @@ class Usage:
     ``input_includes_cache`` says whether ``input_tokens`` counts both of them (True), neither (False), or is unknown
     (None), which a price needs to read the counts. ``models`` is the counts by model, from an agent that knows each
     call's model: it covers every call the turn counted, so a price can charge each model at its own rate. A count
-    the turn leaves out that every row gives is the rows' sum, and so is the includes-cache flag the rows agree on."""
+    the turn leaves out that every row gives is the rows' sum, and so is the includes-cache flag the rows agree on.
+    ``cache_write_ttl_tokens`` is the cache writes by how long they were kept (``ttl_label``'s ``5m``, ``1h``, ``12h``),
+    which a price charges at each time's rate; left out, it's what a provider's split in ``provider_details``
+    (``CACHE_WRITE_SPLITS``) counts, else the rows' sum when every row gives one. Writes it doesn't count weren't
+    said how long they were kept."""
 
     tool_call_count: int | None = None
     input_tokens: int | None = None
@@ -463,6 +547,7 @@ class Usage:
     total_tokens: int | None = None
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
+    cache_write_ttl_tokens: Mapping[str, int] | None = None
     input_includes_cache: bool | None = None
     cost_usd: float | None = None
     models: tuple[ModelUsage, ...] = ()
@@ -486,6 +571,13 @@ class Usage:
         object.__setattr__(
             self, "provider_details", _copy_json_value(self.provider_details)
         )
+        rows = [model.cache_write_ttl_tokens for model in self.models]
+        ttl = _ttl_counts(self.cache_write_ttl_tokens)
+        if ttl is None:
+            ttl = _ttl_from_splits(self.provider_details)
+        if ttl is None and rows and None not in rows:
+            ttl = ttl_sum(rows)
+        object.__setattr__(self, "cache_write_ttl_tokens", ttl)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "Usage":
@@ -511,9 +603,10 @@ class Usage:
         ``cached_tokens`` it counts, and ``cache_write_tokens`` with them. Anthropic's ``input_tokens``, and the
         ``prompt_tokens`` a LiteLLM proxy sends with Anthropic's ``cache_read_input_tokens`` and
         ``cache_creation_input_tokens`` beside it, count neither, so they're added, to ``total_tokens`` too. A
-        provider's split of its cache writes by how long they're kept (Anthropic's ``cache_creation``, OpenAI's
-        ``cache_write_tokens_details``), priced apart, is kept in ``provider_details``; so are the keys of a usage
-        in none of these shapes, as ``unrecognized``. A value that isn't a count is left out."""
+        provider's split of its cache writes by how long they're kept (Anthropic's ``cache_creation``, which a LiteLLM
+        client's ``cache_creation_token_details`` is kept as, and OpenAI's ``cache_write_tokens_details``) is kept in
+        ``provider_details``, and read into ``cache_write_ttl_tokens``; so are the keys of a usage in none of these
+        shapes, as ``unrecognized``. A value that isn't a count is left out."""
         key = "prompt_tokens" if "prompt_tokens" in usage else "input_tokens"
         details = usage.get(f"{key}_details")
         details = details if isinstance(details, Mapping) else {}
@@ -532,7 +625,7 @@ class Usage:
             total += missing
         elif input_tokens is not None and output is not None:
             total = input_tokens + output
-        kept = {"cache_creation": usage.get("cache_creation"),
+        kept = {"cache_creation": usage.get("cache_creation") or details.get("cache_creation_token_details"),
                 "cache_write_tokens_details": details.get("cache_write_tokens_details")}
         provider_details: dict[str, Any] = {
             name: counts for name, split in kept.items() if isinstance(split, Mapping)
@@ -549,7 +642,8 @@ class Usage:
                 and not self.provider_details)
 
     def to_dict(self) -> dict[str, Any]:
-        result = {name: value for name, value in self._values().items() if value is not None}
+        result = {name: dict(value) if isinstance(value, Mapping) else value
+                  for name, value in self._values().items() if value is not None}
         if self.models:
             result["models"] = [model.to_dict() for model in self.models]
         if self.provider_details:

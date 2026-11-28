@@ -12,6 +12,12 @@ from dataclasses import replace
 import pytest
 from agentenv_protocol.a2a_agent import ModelUsage, Usage
 
+from agent_env.a2a_agent.protocol import TerminalResponse
+from agent_env.config.model import ModelRole
+from agent_env.config.model_pricing import ModelPrice, PriceTable
+from agent_env.task_step import usage as usage_module
+from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.usage import StepUsage
 from tst.unit.agents.claude_code.agent import a2a_server, claude_bridge
 from tst.unit.agents.claude_code.support import FakeCLI
 from tst.unit.agents.claude_code.test_claude_bridge_retry import _event, _write_session, scripted  # noqa: F401
@@ -87,6 +93,25 @@ def test_a_turn_whose_subagent_ran_on_another_model_gives_each_models_counts_and
         ModelUsage(model=HAIKU, input_tokens=22010, output_tokens=90, cache_read_tokens=20000,
                    cache_write_tokens=2000, input_includes_cache=True, cost_usd=0.004))
     assert usage.cost_usd == pytest.approx(0.054) and usage.input_tokens == 64020 + 22010
+
+
+def test_a_one_model_turns_writes_kept_an_hour_are_priced_at_the_hours_rate(monkeypatch):
+    tally = {HAIKU: {"inputTokens": 10, "outputTokens": 90, "cacheReadInputTokens": 20000,
+                     "cacheCreationInputTokens": 2000, "cacheCreationEphemeral5mInputTokens": 500,
+                     "cacheCreationEphemeral1hInputTokens": 1500, "costUSD": 0.004}}
+    usage = a2a_server._usage(_result(run_usage=[], model_usage=tally, session_base={}))
+    prices = PriceTable({HAIKU: ModelPrice(input=1.0, output=5.0, cache_read=0.1, cache_write=1.25,
+                                           cache_write_ttl_rates={3600: 2.0})}, "litellm@test")
+    monkeypatch.setattr(usage_module, "litellm_prices", lambda: prices)
+    context = TaskStepContext()
+    steps = StepUsage(context, "solve")
+    steps.start(ModelRole.SOLVER, HAIKU, None)
+
+    steps.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=usage))
+
+    [row] = context.metadata["step_usage"]["solve"][0]["models"]
+    assert row["cost_usd"] == pytest.approx((10 * 1.0 + 90 * 5.0 + 20000 * 0.1 + 500 * 1.25 + 1500 * 2.0) / 1e6)
+    assert row["cache_write_ttl_tokens"] == {"1h": 1500} and "cost_assumed" not in row
 
 
 def test_a_resumed_turn_counts_its_own_calls_not_the_sessions():

@@ -1504,8 +1504,12 @@ cannot drift.
 `cache_read_tokens` and `cache_write_tokens`, and `input_includes_cache`, which
 says whether `input_tokens` counts both cache counts (`True`), neither
 (`False`), or is unknown (`None`, the default). Set the flag whenever you set
-the cache counts: a price can't read them without it. Runtime-specific counts go
-in `provider_details`, but cache counts go in their own fields. `Usage.from_dict`
+the cache counts: a price can't read them without it. `cache_write_ttl_tokens`
+counts the cache writes by how long they were kept, by a time of one unit
+(`{"5m": 200, "1h": 300}`; `s`, `m`, `h` or `d`), which a price charges at each
+time's rate; writes it doesn't count are taken as kept the provider's default
+time. Runtime-specific counts go in `provider_details`, but cache counts go in
+their own fields. `Usage.from_dict`
 reads what `to_dict` wrote under any protocol version, a field it leaves out
 being `None` and a key it doesn't know ignored, and `TaskResult.failure(...,
 usage=...)` carries usage on a failure as `success` does.
@@ -1513,7 +1517,8 @@ usage=...)` carries usage on a failure as `success` does.
 An agent that knows each call's model gives a turn's counts by model in
 `Usage.models`, on every turn: one `ModelUsage` per model, with the model's
 name as called, its `calls`, its token and cache counts read as `Usage`'s are,
-and the agent's own `cost_usd` for them when it has one. That prices a
+its cache writes by time when the agent knows them, and the agent's own
+`cost_usd` for them when it has one. That prices a
 subagent on a smaller model, a side call for a title, or a whole turn a CLI
 ran on another model at that model's own rate. The rows cover every call the
 turn counted; a call the agent can't name goes under the model it was
@@ -1531,10 +1536,13 @@ and Responses (`input_tokens`) shapes and Anthropic's:
 - Anthropic's `input_tokens` counts neither `cache_read_input_tokens` nor
   `cache_creation_input_tokens`, and neither does the `prompt_tokens` a LiteLLM
   proxy sends with those two beside it, so they're added, to `total_tokens` too.
-- A provider's split of its cache writes by how long they're kept, priced apart
-  (Anthropic's `cache_creation`, OpenAI's `cache_write_tokens_details`), is kept
-  in `provider_details`, and so are the keys of a usage in none of these shapes,
-  as `unrecognized`. A value that isn't a count is left out.
+- A provider's split of its cache writes by how long they're kept (Anthropic's
+  `cache_creation`, OpenAI's `cache_write_tokens_details`) is kept in
+  `provider_details` and read into `cache_write_ttl_tokens`, by the time each
+  count's name holds (`ephemeral_1h_input_tokens`, `ttl_12h_tokens`); so are the
+  keys of a usage in none of these shapes, as `unrecognized`. A value that isn't
+  a count is left out. A `Usage` built or read without `cache_write_ttl_tokens`
+  takes it from such a split in its `provider_details`, else from its rows.
 
 Through a gateway, whether a response's input counts the cache depends on the
 model behind it: a LiteLLM proxy's Claude answers through Chat Completions leave

@@ -1,8 +1,8 @@
 """A run's usage for people to read: its ledger (``ledger``) summed by role, then by model. An entry with per-model rows
 (``models``) splits along them; one without counts under its own model. Usage the map couldn't price is unpriced, never
 $0, and makes the cost a lower bound, as a partial or a still running entry does; a cost priced on an assumed rate
-(``cost_assumed``) makes it an upper bound. ``to_dict`` gives a summary as JSON, the one shape every reader takes, with
-the ``bound`` word the CLI prints."""
+(``cost_assumed``) makes it an upper bound, or a lower one for a guess that ``errs_low`` (``Assumed``). ``to_dict``
+gives a summary as JSON, the one shape every reader takes, with the ``bound`` word the CLI prints."""
 
 from __future__ import annotations
 
@@ -13,17 +13,21 @@ from functools import reduce
 from typing import TYPE_CHECKING, Any
 
 from agent_env.config.model import ModelRole
+from agent_env.config.model_pricing import Assumed
 
 if TYPE_CHECKING:
     from agent_env.task_step.usage import ModelEntry, UsageEntry
 
 # The order roles are shown in; any other comes after them.
 _ROLES = tuple(role.value for role in ModelRole)
+# The assumed rates that make a cost a lower bound; any other, an upper one.
+_ERRS_LOW = frozenset(assumed.value for assumed in Assumed if assumed.errs_low)
 
 
 class Bound(StrEnum):
-    """What a cost figure is: the whole cost, a lower bound (some usage unpriced, partial or still running), an upper
-    bound (some cost priced on an assumed rate), an estimate (both), or nothing priced."""
+    """What a cost figure is: the whole cost, a lower bound (some usage unpriced, partial or still running, or priced on
+    a rate that errs low), an upper bound (some cost priced on an assumed rate that errs high), an estimate (both), or
+    nothing priced."""
 
     EXACT = "exact"
     AT_LEAST = "at_least"
@@ -36,9 +40,10 @@ class Bound(StrEnum):
 class Share:
     """One role's usage on one model: its tokens, each None when nothing counted it, and the cost of the part that was
     priced, with ``unpriced`` when some part had no cost and ``unpriced_reasons`` the reasons its entries gave (an
-    entry may give none), ``assumed`` when some part's cost was priced on an assumed rate and ``cost_assumed`` the
-    rates, and ``partial`` when its counts fall short (a partial or a still running entry). The fields after
-    ``partial`` came later, so a caller passing the earlier ones by position keeps working."""
+    entry may give none), ``assumed`` when some part's cost was priced on an assumed rate that errs high,
+    ``assumed_low`` on one that errs low, and ``cost_assumed`` the rates, and ``partial`` when its counts fall short (a
+    partial or a still running entry). The fields after ``partial`` came later, so a caller passing the earlier ones
+    by position keeps working."""
 
     role: str
     model: str | None
@@ -52,10 +57,11 @@ class Share:
     cache_write_tokens: int | None = None
     unpriced_reasons: set[str] = field(default_factory=set)
     cost_assumed: set[str] = field(default_factory=set)
+    assumed_low: bool = False
 
     @property
     def lower_bound(self) -> bool:
-        return self.unpriced or self.partial
+        return self.unpriced or self.partial or self.assumed_low
 
     @property
     def upper_bound(self) -> bool:
@@ -80,8 +86,10 @@ class Share:
                 self.unpriced_reasons.add(reason)
         else:
             self.cost_usd = (self.cost_usd or 0.0) + cost
-            self.assumed = self.assumed or bool(part.get("cost_assumed"))
-            self.cost_assumed.update(part.get("cost_assumed") or ())
+            values = part.get("cost_assumed") or ()
+            self.assumed = self.assumed or any(value not in _ERRS_LOW for value in values)
+            self.assumed_low = self.assumed_low or any(value in _ERRS_LOW for value in values)
+            self.cost_assumed.update(values)
         self.partial = self.partial or partial
 
 

@@ -89,6 +89,20 @@ def test_a_cost_priced_on_an_assumed_rate_is_at_most_and_with_uncounted_usage_an
         "cost: estimated $0.0005 (solver gpt-4.1-mini estimated $0.0005, 1.1k in, 11 out, partial)")
 
 
+@pytest.mark.parametrize("low", ["below_context_tier", "default_cache_ttl"])
+def test_a_cost_priced_on_a_rate_that_errs_low_is_at_least_and_with_one_that_errs_high_an_estimate(low):
+    marked = _entry("solver", "m", 1000, 10, 0.004, cost_assumed=[low])
+    summary = summarize([marked, _entry("judge", "j", 100, 1, 0.0001)])
+
+    assert summary.lower_bound and not summary.upper_bound
+    assert _bounds(summary) == (Bound.AT_LEAST, [Bound.AT_LEAST, Bound.EXACT])
+    assert (summary.shares[0].assumed_low, summary.shares[0].assumed) == (True, False)
+    assert cost_line(summary).startswith("cost: at least $0.0041 (solver m at least $0.0040")
+    both = summarize([_entry("solver", "m", 1000, 10, 0.004, cost_assumed=[low, "cache_read_rate"])])
+    assert _bounds(both) == (Bound.ESTIMATED, [Bound.ESTIMATED])
+    assert cost_line(both).startswith("cost: estimated $0.0040 (solver m estimated $0.0040")
+
+
 def test_a_per_model_row_priced_on_an_assumed_rate_bounds_its_own_share():
     rows = [{"model": "a", "input_tokens": 9, "output_tokens": 1, "cost_usd": 0.2,
              "cost_assumed": ["cache_write_rate"]},
@@ -157,14 +171,16 @@ def test_a_summary_is_one_json_shape_with_the_bound_word_on_its_total_and_each_s
         "shares": [
             {"role": "solver", "model": "gpt-4.1-mini", "cost_usd": pytest.approx(0.0005), "bound": "estimated",
              "input_tokens": 1200, "output_tokens": 12, "cache_read_tokens": None, "cache_write_tokens": None,
-             "unpriced": False, "unpriced_reasons": [], "assumed": True, "cost_assumed": ["cache_read_rate"],
+             "unpriced": False, "unpriced_reasons": [], "assumed": True, "cost_assumed": ["cache_read_rate"], "assumed_low": False,
              "partial": True},
             {"role": "user_simulator", "model": "gpt-4.1-nano", "cost_usd": 0.0002, "bound": "exact",
              "input_tokens": None, "output_tokens": None, "cache_read_tokens": None, "cache_write_tokens": None,
-             "unpriced": False, "unpriced_reasons": [], "assumed": False, "cost_assumed": [], "partial": False},
+             "unpriced": False, "unpriced_reasons": [], "assumed": False, "cost_assumed": [], "assumed_low": False,
+             "partial": False},
             {"role": "judge", "model": "mystery-1", "cost_usd": None, "bound": "unpriced", "input_tokens": 300,
              "output_tokens": 3, "cache_read_tokens": None, "cache_write_tokens": None, "unpriced": True,
-             "unpriced_reasons": ["no_price"], "assumed": False, "cost_assumed": [], "partial": False}]}
+             "unpriced_reasons": ["no_price"], "assumed": False, "cost_assumed": [], "assumed_low": False,
+             "partial": False}]}
     assert json.loads(json.dumps(shape)) == shape
     assert summary.to_dict(attempts=False)["attempts"] is None
 

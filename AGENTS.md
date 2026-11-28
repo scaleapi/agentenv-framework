@@ -88,10 +88,20 @@ or one of them only where it is used.
   importing LiteLLM, which would fetch a newer map from the network; there is no price config. A model is found by its
   name as called or without its routing prefix, wherever its calls went. A prompt step prices each role's usage entry as
   it records it: `cost_usd` with its `cost_status` (`priced`, `reported`, `unpriced`) and `cost_source`
-  (`litellm@<version>`, `harness` or `provider`), the `uncached_input_tokens` and `unit_prices` it was charged at, any
-  `cost_assumed` that makes it an upper bound, and the agent's own figure, always, in `reported_cost_usd`. A turn
-  that gives its counts by model (`Usage.models`) is priced model by model, each at its own rate, and its entry keeps
-  a row per model (`models`), its `cost_usd` their sum.
+  (`litellm@<version>`, `harness` or `provider`), the `uncached_input_tokens` and `unit_prices` it was charged at, the
+  rates it guessed in `cost_assumed`, and the agent's own figure, always, in `reported_cost_usd`. A guessed cache rate
+  or cache count makes the cost an upper bound; `below_context_tier` and `default_cache_ttl` make it a lower one
+  (`Assumed.errs_low`). A call whose prompt, cache included, is over a model's long-context tier is charged the tier's
+  rates only when it's priced alone, as core's own calls are (`complete`); a sum of calls, as an agent's turns are,
+  one of which went over, is priced at the base rates and marked `below_context_tier`. Cache writes a usage says how
+  long were kept (`Usage.cache_write_ttl_tokens`, `{"1h": n}`, which the protocol reads from a provider's split in
+  `provider_details` when an agent doesn't set it) are charged the map's rate for the longest time at most theirs
+  (`cache_creation_input_token_cost_above_<N>hr`), else the base write rate, and those charged more are kept in the
+  entry's `cache_write_ttl_tokens` with `unit_prices` `cache_write_<time>`; writes it doesn't count, on a model that
+  charges more for some longer time, are charged the base write rate and marked `default_cache_ttl`. A turn that
+  gives its counts by model (`Usage.models`) is priced model by model, each at its own rate and its own writes by time
+  (`ModelUsage.cache_write_ttl_tokens`, a one-model turn's row taking the turn's when it gives none), and its entry
+  keeps a row per model (`models`), its `cost_usd` their sum.
 - Core's own model calls, the judges', go through `config/model_call.py` (`resolve_route`, `complete`), the only
   module in core that imports LiteLLM (`tst/unit/config/test_one_model_call_path.py`). Each call returns the model it
   called, the host it reached and its cost: what the endpoint billed, a LiteLLM proxy's `x-litellm-response-cost`, as
@@ -403,7 +413,7 @@ orchestrators call it the same way. What callers rely on:
   (`usage.ledger.ahead`), and the step's completion replaces them with its final entries. A re-register keeps it, so
   it holds every attempt and generation. `task/usage/summary.py` sums it by role, then by model, for the run summaries
   (`agent-env run`, `eval run`, `task run`), unpriced usage counted apart, never as $0, and a cost priced on an
-  assumed rate (`cost_assumed`) shown as at most. Its `to_dict` is the summary's one JSON shape, with the `Bound` the
+  assumed rate (`cost_assumed`) shown as at most, or at least for a rate that errs low. Its `to_dict` is the summary's one JSON shape, with the `Bound` the
   CLI prints (`exact`, `at_least`, `at_most`, `estimated`, `unpriced`), for any reader that shows a run's cost, and
   each share's cache reads and writes, why any of it went unpriced (`unpriced_reasons`) and the rates it assumed
   (`cost_assumed`). A

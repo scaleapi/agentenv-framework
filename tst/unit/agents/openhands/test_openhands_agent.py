@@ -718,7 +718,9 @@ def test_a_turns_usage_is_unknown_where_no_usage_came_back() -> None:
 
 def test_a_claude_turn_through_a_proxy_that_counts_the_cache_is_priced_once() -> None:
     """openhands-baseline-claude, recorded on 2026-11-20 through Scale's LiteLLM proxy, whose Claude prompt counts the
-    cache: the turn's cost is what the proxy's calls cost, not the cache charged twice."""
+    cache: the turn's cost is what the proxy's calls cost, not the cache charged twice. OpenHands doesn't say how long
+    its writes were kept, so they're charged the five-minute rate, as the proxy billed them, and marked as possibly
+    low."""
     usage = openhands_agent.turn_usage([(_call(10381, 215, write=10371), False),
                                         (_call(10813, 65, read=10371, write=428), False)],
                                        responses=2, tool_calls=2, cost=0.01595985)
@@ -729,4 +731,4 @@ def test_a_claude_turn_through_a_proxy_that_counts_the_cache_is_priced_once() ->
     assert (usage.input_tokens, usage.cache_read_tokens, usage.cache_write_tokens, usage.input_includes_cache) == (
         21194, 10371, 10799, True)
     assert abs(entry["cost_usd"] - 0.01595985) < 1e-9 and entry["uncached_input_tokens"] == 24
-    assert "cost_assumed" not in entry
+    assert entry["cost_assumed"] == ["default_cache_ttl"]

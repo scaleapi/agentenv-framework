@@ -734,6 +734,7 @@ def test_a_reported_usages_cache_write_split_counts_only_where_it_holds_counts(c
     task = _settled(client, task_id)
     assert task["status"]["state"] == "completed"
     assert _usage(task)["provider_details"] == {"model_calls": 3, "cache_creation": {"ephemeral_5m_input_tokens": 7}}
+    assert _usage(task)["cache_write_ttl_tokens"] == {"5m": 7}
 
 
 def test_a_turn_sums_each_providers_cache_write_split_and_counts_usage_it_couldnt_read(client):
@@ -746,10 +747,12 @@ def test_a_turn_sums_each_providers_cache_write_split_and_counts_usage_it_couldn
         assert _proxy(client, "record", task_id=task_id, message="Thinking.", usage=usage).status_code == 200
     _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "Done."}])
 
-    assert _usage(_settled(client, task_id))["provider_details"] == {
+    usage = _usage(_settled(client, task_id))
+    assert usage["provider_details"] == {
         "model_calls": 3, "unrecognized": 1,
         "unreported": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 1, "cache_write_tokens": 1},
         "cache_creation": {"ephemeral_1h_input_tokens": 7813, "ephemeral_5m_input_tokens": 20}}
+    assert usage["cache_write_ttl_tokens"] == {"1h": 7813, "5m": 20}
 
 
 def test_an_env_tool_named_bash_is_held_to_all_its_recorded_arguments(terminal, monkeypatch, tmp_path):

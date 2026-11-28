@@ -103,7 +103,7 @@ async def complete(route: ModelRoute, messages: list[dict], *, timeout: Optional
     usage = getattr(response, "usage", None)
     usage = usage.model_dump() if hasattr(usage, "model_dump") else usage
     usage = usage if isinstance(usage, dict) else None
-    tokens = Tokens.of(Usage.from_model_response(usage).to_dict()) if usage else None
+    tokens = Tokens.of(Usage.from_model_response(usage).to_dict(), one_call=True) if usage else None
     cost = price(tokens, _billed(getattr(response, "_hidden_params", None)), model=route.model,
                  prices=litellm_prices(), reported_by=ReportedBy.PROVIDER)
     return ModelReply(response.choices[0].message.content or "", route.model, route.endpoint_host, usage, cost)
