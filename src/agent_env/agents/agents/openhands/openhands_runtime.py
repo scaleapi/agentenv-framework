@@ -3,6 +3,7 @@ default tools, the task's MCP servers and its skills."""
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
@@ -21,10 +22,11 @@ from openhands.tools.preset.default import get_default_condenser, get_default_to
 from pydantic import PrivateAttr
 
 from conversation_run import ConversationRun
-from openhands_agent import Outcome, Turn, turn_usage
+from openhands_agent import CallFeed, Outcome, Turn, turn_usage
 
 # The AgentEnv endpoint is a LiteLLM gateway; this provider prefix sends LiteLLM's requests to it as is.
 _PROVIDER: Final[str] = "litellm_proxy"
+_Retried = Callable[[int, int, BaseException | None], None]
 
 
 class _GatewayLLM(LLM):
@@ -39,10 +41,12 @@ class _GatewayLLM(LLM):
         return api_key, {**self._gateway_headers, **headers}
 
 
-def _llm(turn: Turn) -> LLM:
+def _llm(turn: Turn, retried: _Retried | None) -> LLM:
     options: dict[str, Any] = {}
     if turn.config.effort is not None:
         options["reasoning_effort"] = turn.config.effort
+    if retried is not None:
+        options["retry_listener"] = retried
     llm = _GatewayLLM(
         usage_id="agent",
         model=f"{_PROVIDER}/{turn.config.model}",
@@ -54,7 +58,9 @@ def _llm(turn: Turn) -> LLM:
     return llm
 
 
-def _agent(turn: Turn) -> Agent:
+def _agent(turn: Turn, retried: _Retried | None) -> Agent:
+    """The turn's agent; ``retried`` hears of each model call its LLMs, the condenser's copy too, fail and make
+    again."""
     skills = []
     if turn.skill_names and turn.skills_dir.is_dir():
         loaded = load_skills_from_dir(turn.skills_dir, strict=False)
@@ -68,7 +74,7 @@ def _agent(turn: Turn) -> Agent:
     options: dict[str, Any] = {}
     if turn.config.system_prompt:
         options["system_prompt"] = turn.config.system_prompt
-    llm = _llm(turn)
+    llm = _llm(turn, retried)
     return Agent(
         llm=llm,
         tools=get_default_tools(enable_browser=False),
@@ -86,13 +92,19 @@ def _agent(turn: Turn) -> Agent:
     )
 
 
+def _metered(agent: Agent) -> list[LLM]:
+    """The turn's LLMs, each metrics object once: the condenser's is a copy of the agent's, which may share it."""
+    return list({id(llm.metrics): llm for llm in (agent.llm, getattr(agent.condenser, "llm", None))
+                 if llm is not None}.values())
+
+
 def _usage(agent: Agent, tool_calls: int) -> Usage:
     """What the turn's LLMs have spent, call by call: they are made for the turn, so they start at nothing. Each
     response they got has a latency recorded, with or without usage."""
-    llms = {id(llm.metrics): llm for llm in (agent.llm, getattr(agent.condenser, "llm", None)) if llm is not None}
-    calls = [(usage, llm.uses_responses_api()) for llm in llms.values() for usage in llm.metrics.token_usages]
-    responses = sum(len(llm.metrics.response_latencies) for llm in llms.values())
-    cost = sum(llm.metrics.accumulated_cost for llm in llms.values())
+    llms = _metered(agent)
+    calls = [(usage, llm.uses_responses_api()) for llm in llms for usage in llm.metrics.token_usages]
+    responses = sum(len(llm.metrics.response_latencies) for llm in llms)
+    cost = sum(llm.metrics.accumulated_cost for llm in llms)
     return turn_usage(calls, responses=responses, tool_calls=tool_calls, cost=cost or None)
 
 
@@ -127,6 +139,7 @@ class SdkRuntime:
         actions = 0
         # The SDK reports why a run failed only as events, whether or not it raises.
         errors: list[ConversationErrorEvent] = []
+        feed = CallFeed(turn.on_event, turn.on_aux, model=turn.config.model, effort=turn.config.effort)
 
         def on_event(event: Event) -> None:
             nonlocal actions
@@ -134,9 +147,11 @@ class SdkRuntime:
                 actions += 1
             elif isinstance(event, ConversationErrorEvent):
                 errors.append(event)
-            turn.on_event(event.model_dump(mode="json"))
+            feed.event(event.model_dump(mode="json"))
 
-        agent = _agent(turn)
+        agent = _agent(turn, feed.retried if feed.builds else None)
+        feed.llms = _metered(agent)
+        feed.clock()
 
         def open_conversation() -> BaseConversation:
             return Conversation(
@@ -163,6 +178,10 @@ class SdkRuntime:
                 await asyncio.to_thread(conversation.send_message, Message(role="user", content=content))
             except Exception as exc:  # the agent's tools or MCP servers failing to start, for one
                 return _unstarted(exc)
+            if feed.builds:
+                # As the agent offers them to its model, which the system prompt's event doesn't say.
+                feed.tools([tool.to_openai_tool(add_security_risk_prediction=True)
+                            for tool in conversation.agent.tools_map.values()])
             try:
                 await run.to_its_end()
             except ConversationRunError as exc:
@@ -187,4 +206,6 @@ class SdkRuntime:
             return Outcome(reply or "The agent finished without a reply.", usage)
         finally:
             self._runs.discard(run)
+            # A response no event followed, as one the run was cut off after.
+            feed.end()
             await asyncio.to_thread(conversation.close)
