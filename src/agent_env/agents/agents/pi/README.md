@@ -57,12 +57,14 @@ input (`pi_atif.counted`, which the atif/1 copy's steps count by too). `cost_usd
 (`pi.model_error`), `aborted` is an `agent_error`, and a timeout kills pi's process group. A cancelled or timed-out
 task keeps the events pi printed before it stopped.
 
-The atif/1 copy (`pi_atif.PiAtif`) has a step per model call, from each assistant `message_end`: its model (the one
-the endpoint answered as), the time pi sent the request, its usage, its thinking as reasoning, its text and its tool
-calls, each with the `toolResult` message after it, images as media files. The tools on the agent block are those pi's
-system messages declare. A call pi ended with an error and no usage is one the endpoint refused, a step with no model
-call holding the error, and each retry pi starts after one is a further attempt; a response that ended in an error or
-was aborted has its calls left out, since pi runs none of them. A compaction is its summary call's step, timed by when the bridge saw it start. While
+The atif/1 copy (`pi_atif.PiAtif`) has a step per model call, from each assistant `message_end`: its model (as pi
+called it, which a refused call names too), the time pi sent the request, its usage, its thinking as reasoning, its
+text and its tool calls, each with the `toolResult` message after it, images as media files. The tools on the agent block are those pi's
+system messages declare. A call pi ended with an error, no usage and no content is one the endpoint refused, a step
+with no model call holding the error, and each retry pi starts after one is a further attempt; a response that ended in
+an error or was aborted has its calls left out, since pi runs none of them, and one cut off before its usage came is a
+model call of unknown usage holding what it streamed, as the turn's usage counts it among `unreported_calls`. A
+compaction is its summary call's step, timed by when the bridge saw it start and named by the task's model. While
 a task builds the copy, the bridge feeds it two aux records (`bridge`): each compaction's start, and, when a new copy
 starts on a session pi resumes (after the agent restarts, say), the session's tools, which pi declares only as they
 change.

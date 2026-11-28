@@ -131,9 +131,9 @@ class Feed:
             {"type": "agent_settled", "aborted": False})
 
 
-def context(index=0) -> TurnContext:
+def context(index=0, model=MODEL) -> TurnContext:
     return TurnContext(index=index, context_id="ctx", task_id=f"t{index}", message_id=f"m{index}", inbound=["do it"],
-                       agent_name="pi", agent_version="1.1.0", agent_model=MODEL,
+                       agent_name="pi", agent_version="1.1.0", agent_model=model,
                        started_at=f"2026-11-27T16:00:0{index}Z")
 
 
@@ -293,12 +293,43 @@ def test_a_response_that_ended_in_an_error_keeps_its_usage_and_runs_none_of_its_
     assert profile_of(step)["error"] == {"kind": "infra_error", "message": "terminated"}
 
 
+def test_a_stream_cut_off_before_its_usage_is_a_model_call_holding_what_it_streamed():
+    """As pi's Chat Completions client ends a stream that broke after some deltas (an overload mid-answer, say): the
+    blocks so far, and zeros for the usage chunk that never came. The endpoint answered, so the call isn't one it
+    refused; pi retries it all the same."""
+    feed = Feed().start(BASH)
+    feed.assistant(thinking("Let me"), text("Running"), call(""), stop="error", counts=usage(),
+                   errorMessage="overloaded_error: Overloaded", responseId=None)
+    feed.event({"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 2000})
+    feed.assistant(text("ok")).end()
+    cut, answered = agent_steps(run(feed, finals=[["ok"]]).document)
+
+    assert cut["llm_call_count"] == 1 and "metrics" not in cut and "tool_calls" not in cut
+    assert cut["message"] == "Running" and cut["reasoning_content"] == "Let me"
+    assert profile_of(cut)["error"] == {"kind": "infra_error", "message": "overloaded_error: Overloaded"}
+    assert profile_of(answered)["attempt"] == 2
+
+
 def test_an_aborted_response_is_an_agent_error():
     feed = Feed().start().assistant(text("Runn"), call("call_1"), stop="aborted", counts=usage())
     (step,) = agent_steps(run(feed.end(), state="canceled").document)
 
     assert step["llm_call_count"] == 1 and "tool_calls" not in step
     assert profile_of(step)["error"] == {"kind": "agent_error", "message": "pi aborted the run"}
+
+
+def test_every_call_is_named_by_the_model_as_called_answered_or_refused():
+    """As the endpoint answered in the recorded retried run: its answers name the model without the routing prefix,
+    and a refused call names none, so the steps take the name pi called, the turn's own."""
+    feed = Feed().start(BASH)
+    feed.assistant(call("call_1"), stop="toolUse", responseModel="claude-haiku-4-5").result("call_1")
+    feed.assistant(stop="error", counts=usage(), errorMessage="503 service unavailable", responseId=None)
+    feed.event({"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 2000})
+    feed.assistant(text("first second"), responseModel="claude-haiku-4-5").end()
+    document = run(feed, finals=[["first second"]]).document
+
+    assert [step["model_name"] for step in agent_steps(document)] == [MODEL] * 3
+    assert document["agent"]["model_name"] == MODEL
 
 
 def test_a_compaction_is_its_summary_calls_step_timed_by_the_bridge_and_named_by_the_sessions_model():
@@ -308,13 +339,32 @@ def test_a_compaction_is_its_summary_calls_step_timed_by_the_bridge_and_named_by
     steps = agent_steps(run(feed, finals=[["5050"]]).document)
     first, summary, answer = steps
 
-    assert first["model_name"] == "claude-haiku-4-5-20251001"
+    assert first["model_name"] == "claude-haiku-4-5"
     assert summary["message"] == "The user asked for the sum; hello.py prints 5050."
     assert summary["timestamp"] == "2026-11-27T16:00:05.000Z" and summary["model_name"] == first["model_name"]
     assert profile_of(summary)["compaction"] == {"written_by": "assistant", "trigger": "auto",
                                                  "tokens_before": 7616, "tokens_after": 1210}
     assert summary["metrics"]["prompt_tokens"] == 329 and summary["metrics"]["completion_tokens"] == 156
     assert answer["message"] == "5050"
+
+
+def test_a_compaction_before_a_later_tasks_prompt_is_named_by_the_model_that_task_runs():
+    """pi checks for a compaction before it sends a later task's prompt, and summarizes with the model the task runs
+    (its --model, the turn's), not the one the task before called."""
+    first = Feed().start(BASH).assistant(text("5050")).end()
+    second = Feed().event({"type": "session", "version": 3, "id": "ctx", "timestamp": "2026-11-27T16:00:00.000Z",
+                           "cwd": "/workspace"})
+    second.compaction(usage(329, 156)).event({"type": "agent_start"}).event({"type": "turn_start"})
+    second.message({"role": "user", "content": "and again", "timestamp": Feed.now()})
+    second.assistant(text("500500"), model="openai/gpt-4.1-mini").end()
+    kit = check_adapter(PiAtif, [RecordedTask(context=context(0), records=first.records, final=["5050"]),
+                                 RecordedTask(context=context(1, model="openai/gpt-4.1-mini"), records=second.records,
+                                              final=["500500"])])
+    kit.raise_for_errors()
+    _, summary, answer = agent_steps(kit.document)
+
+    assert "compaction" in profile_of(summary)
+    assert summary["model_name"] == answer["model_name"] == "openai/gpt-4.1-mini"
 
 
 def test_a_failed_compaction_is_a_step_with_no_model_call_and_an_aborted_one_none():

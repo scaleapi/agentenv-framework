@@ -263,10 +263,12 @@ def _record(run: _Run, event: dict[str, Any]) -> bool:
 def _usage(run: _Run) -> Usage:
     """The turn's usage, summed over its assistant messages and its compactions' summary calls, with ``input_tokens``
     counting the cache. A usage that is all zero got none from its endpoint, as a streamed Claude answer through a
-    LiteLLM proxy, or a compaction that ended without one, and is counted in ``unreported_calls`` instead of as nothing
-    used; a message pi ended with an error and no usage was a request the endpoint refused, and counts nothing."""
+    LiteLLM proxy, a stream cut off before its usage came, or a compaction that ended without one, and is counted in
+    ``unreported_calls`` instead of as nothing used; a message pi ended with an error, no usage and no content was a
+    request the endpoint refused, and counts nothing."""
     counts, cost, unreported = [], 0.0, 0
-    usages = [(message.get("usage") or {}, message.get("stopReason") == "error") for message in run.assistant_messages]
+    usages = [(message.get("usage") or {}, message.get("stopReason") == "error" and not message.get("content"))
+              for message in run.assistant_messages]
     for usage, refused in usages + [(usage, False) for usage in run.summary_usages]:
         tokens = counted(usage)
         if tokens is None:

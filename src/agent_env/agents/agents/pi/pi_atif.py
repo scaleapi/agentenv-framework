@@ -4,8 +4,9 @@ and its usage, whose input pi counts without the prompt cache, so ``counted`` ad
 call's results are the ``toolResult`` messages after it, by call id, and the model's tools each system message's
 ``toolsAdded``. Two things only the bridge knows come as aux records (``bridge``): when each compaction started, since a
 compaction's summary call is reported only in its ``compaction_end``, untimed; and a resumed session's tools when a new
-document starts on it, since pi declares tools only as they change. A call pi ended with an error and no usage is one
-the endpoint refused, a step with no model call holding the error, and each retry pi starts is a harness attempt."""
+document starts on it, since pi declares tools only as they change. A call pi ended with an error, no usage and no
+content is one the endpoint refused, a step with no model call holding the error, and each retry pi starts is a harness
+attempt."""
 from __future__ import annotations
 
 import base64
@@ -75,33 +76,35 @@ class PiAtif(Adapter):
 
     def __init__(self, turn: Any) -> None:
         self._seq = 0
-        self._model: str | None = None
         self._new_task()
 
     def _new_task(self) -> None:
         self._retries = 0
         self._compaction_at: str | None = None
+        self._model: str | None = None
 
     @native(type="message_end", where={"message.role": "assistant"})
     def assistant(self, record: dict[str, Any], turn: Any) -> None:
-        """A model call's step. A response that ended in an error or was aborted has its calls left out: pi runs none of
-        them, and one cut off mid-stream may have no id yet."""
+        """A model call's step, named by the model as called, which a refused call has too, not the endpoint's answered
+        name. A response that ended in an error or was aborted has its calls left out: pi runs none of them, and one
+        cut off mid-stream may have no id yet. One cut off before its usage came is still a model call, holding what it
+        streamed: only a call with nothing streamed was refused."""
         message = record["message"]
         key = self._key("call")
-        model = _string(message.get("responseModel")) or _string(message.get("model"))
+        model = _string(message.get("model")) or _string(message.get("responseModel"))
         self._model = model or self._model
         when, stop, usage = _iso(message.get("timestamp")), message.get("stopReason"), message.get("usage")
         error = message.get("errorMessage") or ("pi aborted the run" if stop == "aborted" else
                                                 "pi reported a model error")
         kind = "infra_error" if stop == "error" else "agent_error"
-        if stop == "error" and counted(usage or {}) is None:
+        blocks = [block for block in message.get("content") or () if _is_mapping(block)]
+        if stop == "error" and counted(usage or {}) is None and not blocks:
             turn.step(key=key, llm_call_count=0, model_name=model, time=when)
             turn.error(message=error, kind=kind, step=key)
             return
         effort = _string(message.get("thinkingLevel"))
         turn.step(key=key, model_name=model, reasoning_effort=None if effort == "off" else effort, time=when,
                   **_counts(usage))
-        blocks = [block for block in message.get("content") or () if _is_mapping(block)]
         for block in blocks:
             if block.get("type") == "thinking":
                 _reasoning(block, key, turn)
@@ -127,7 +130,8 @@ class PiAtif(Adapter):
 
     @native(type="compaction_end")
     def compaction(self, record: dict[str, Any], turn: Any) -> None:
-        """A compaction's summary call: its summary, its usage, and the session's model, which pi summarizes with."""
+        """A compaction's summary call: its summary, its usage, and the model pi summarizes with, the task's own: its
+        calls', or before any the one the task runs, which a compaction before a later task's prompt has too."""
         result, when = record.get("result"), self._compaction_at
         self._compaction_at = None
         key = self._key("compaction")

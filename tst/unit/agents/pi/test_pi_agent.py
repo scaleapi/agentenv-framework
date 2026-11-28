@@ -169,12 +169,21 @@ def test_a_call_that_reported_no_usage_is_unknown_not_zero() -> None:
 def test_a_request_the_endpoint_refused_counts_nothing() -> None:
     """As in pi-retry-faults on 2026-11-20: pi ends a request the proxy refused with a 500 as an error message with no
     usage, then retries it. The refused request wasn't billed; the retry was answered."""
-    refused = {**_message(0, 0, 0, 0), "stopReason": "error", "errorMessage": "500 Internal Server Error"}
+    refused = {**_message(0, 0, 0, 0), "stopReason": "error", "errorMessage": "500 Internal Server Error", "content": []}
     run = pi_agent._Run(assistant_messages=[refused, _message(1109, 21, 0, 1130)])
 
     assert pi_agent._usage(run).to_dict() == {
         "tool_call_count": 0, "input_tokens": 1109, "output_tokens": 21, "total_tokens": 1130, "cache_read_tokens": 0,
         "cache_write_tokens": 0, "input_includes_cache": True}
+
+
+def test_a_stream_cut_off_before_its_usage_is_unreported_not_refused() -> None:
+    """pi keeps what a broken stream sent and zeros for the usage chunk that never came: the endpoint answered it."""
+    cut = {**_message(0, 0, 0, 0), "stopReason": "error", "errorMessage": "terminated",
+           "content": [{"type": "text", "text": "Running"}]}
+    run = pi_agent._Run(assistant_messages=[cut, _message(1109, 21, 0, 1130)])
+
+    assert pi_agent._usage(run).provider_details == {"unreported_calls": 1}
 
 
 def test_a_context_keeps_one_pi_session(client: TestClient, record: Path) -> None:
