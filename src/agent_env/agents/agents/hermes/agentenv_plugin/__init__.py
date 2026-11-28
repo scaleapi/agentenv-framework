@@ -8,13 +8,18 @@ reads them as the turn's trajectory. Each event is a hook's name as ``type`` and
 
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import os
+import re
 import threading
 import time
+from pathlib import Path
 
 _EVENTS_FD = "AGENTENV_EVENTS_FD"
 _write_lock = threading.Lock()
+_MEDIA_TAG = re.compile(r"MEDIA:(/[^\s\"'\\]+)")
 
 
 def _message(message) -> dict:
@@ -33,10 +38,31 @@ def _answer(response) -> str | None:
     return message.get("content") if isinstance(message, dict) else None
 
 
+def _media(payload: dict) -> list[dict] | None:
+    """The images a tool's result names by ``MEDIA:<path>`` in Hermes' media cache, as a screenshot an MCP tool
+    returned, read while the file is there: a route that takes no images hands the model that path alone."""
+    result, home = payload.get("result"), os.environ.get("HERMES_HOME")
+    if not isinstance(result, str) or not home:
+        return None
+    cache, media = Path(home, "cache").resolve(), []
+    for tagged in dict.fromkeys(_MEDIA_TAG.findall(result)):
+        path = Path(tagged).resolve()
+        kind = mimetypes.guess_type(path.name)[0] or ""
+        if not (kind.startswith("image/") and path.is_relative_to(cache)):
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        media.append({"path": tagged, "media_type": kind, "data": base64.b64encode(data).decode()})
+    return media or None
+
+
 # Each hook this plugin records, and the fields of its payload an event keeps.
 _HOOKS = {
     "on_session_start": ("session_id", "model"),
     "pre_tool_call": ("session_id", "turn_id", "api_request_id", "tool_call_id", "tool_name", "args"),
+    # With ``media``, the images its result names in Hermes' media cache (``_ADDED``).
     "post_tool_call": ("session_id", "turn_id", "api_request_id", "tool_call_id", "tool_name", "result", "status",
                        "duration_ms", "error_type", "error_message"),
     # ``response`` is Hermes' sanitized record of the model's answer, its strings cut at 8000 characters; ``message``
@@ -61,6 +87,10 @@ _SHAPED = {
     "post_api_request": {"assistant_message": ("message", _message)},
     "post_auxiliary_call": {"response": ("content", _answer)},
 }
+# Fields an event adds, each made from the hook's whole payload, by hook.
+_ADDED = {
+    "post_tool_call": {"media": _media},
+}
 
 
 def _write(event: dict) -> None:
@@ -73,7 +103,7 @@ def _write(event: dict) -> None:
 
 
 def _recorder(hook: str, fields: tuple[str, ...]):
-    shaped = _SHAPED.get(hook, {})
+    shaped, added = _SHAPED.get(hook, {}), _ADDED.get(hook, {})
 
     def record(**payload) -> None:
         event = {"type": hook, "timestamp": int(time.time() * 1000)}
@@ -82,6 +112,9 @@ def _recorder(hook: str, fields: tuple[str, ...]):
             if name in shaped and value is not None:
                 name, value = shaped[name][0], shaped[name][1](value)
             if value is not None:
+                event[name] = value
+        for name, make in added.items():
+            if (value := make(payload)) is not None:
                 event[name] = value
         _write(event)
     return record

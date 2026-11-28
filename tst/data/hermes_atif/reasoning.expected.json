@@ -1,0 +1,88 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-hermes-reasoning",
+ "agent": {
+  "name": "Hermes Agent",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:56:41.560542Z",
+   "source": "user",
+   "message": "Think it through, then reply with only the answer: how many positive integers below 1000 are divisible by 3 or 5 but not by 15?",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-hermes-reasoning",
+     "task_id": "7c4728b8-ea17-4674-ab8b-c7d736dc9d80",
+     "message_id": "0590a63fe42140ba8bb9a1b65ef4b6c5",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:56:49.511860Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 434,
+    "cached_tokens": 0,
+    "completion_tokens": 28,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:56:46.951456Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "reasoning_effort": "high",
+   "message": "I need to find positive integers below 1000 that are divisible by 3 or 5, but not by 15.\n\nLet me think through this:\n\n- Divisible by 3: floor(999/3) = 333\n- Divisible by 5: floor(999/5) = 199\n- Divisible by both 3 and 5 (i.e., divisible by 15): floor(999/15) = 66\n\nUsing inclusion-exclusion:\n- Numbers divisible by 3 OR 5: 333 + 199 - 66 = 466\n\nBut I need to exclude those divisible by 15:\n- Numbers divisible by 3 or 5, but NOT by 15: 466 - 66 = 400\n\nWait, let me reconsider. The numbers divisible by both 3 and 5 are exactly those divisible by 15. So:\n- Divisible by 3 only: 333 - 66 = 267\n- Divisible by 5 only: 199 - 66 = 133\n- Total divisible by 3 or 5 but not by 15: 267 + 133 = 400\n\n**400**",
+   "metrics": {
+    "prompt_tokens": 13054,
+    "cached_tokens": 0,
+    "completion_tokens": 293,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 13051
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 13488,
+  "total_completion_tokens": 321,
+  "total_cached_tokens": 0,
+  "total_steps": 3,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 13051
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "hermes-hook-events/1",
+   "adapter": {
+    "name": "hermes-hook-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

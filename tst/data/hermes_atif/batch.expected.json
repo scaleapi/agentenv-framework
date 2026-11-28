@@ -1,0 +1,288 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-hermes-batch",
+ "agent": {
+  "name": "Hermes Agent",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:57:04.524530Z",
+   "source": "user",
+   "message": "Make one delegate_task call with two tasks: one sub-agent runs `wc -l /etc/passwd`, the other runs `uname -s`, each reporting its output. Then reply with both outputs on one line.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-hermes-batch",
+     "task_id": "d9f6b77c-dae6-47f0-9b4a-0352a18d035d",
+     "message_id": "08f8fe8a02524ee1af1eb359408140f9",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:57:09.909047Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_011rnfExuyU5PR7xt9MMMqh5",
+     "function_name": "delegate_task",
+     "arguments": {
+      "tasks": [
+       {
+        "goal": "Run the command `wc -l /etc/passwd` and report the output."
+       },
+       {
+        "goal": "Run the command `uname -s` and report the output."
+       }
+      ]
+     }
+    },
+    {
+     "tool_call_id": "toolu_vrtx_011rnfExuyU5PR7xt9MMMqh5:20261128_065711_cf3164",
+     "function_name": "delegate_task",
+     "arguments": {
+      "goal": "Run the command `uname -s` and report the output."
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_011rnfExuyU5PR7xt9MMMqh5:20261128_065711_cf3164",
+      "content": "The output of `uname -s` is **Linux**.",
+      "subagent_trajectory_ref": [
+       {
+        "trajectory_id": "20261128_065711_cf3164"
+       }
+      ]
+     },
+     {
+      "source_call_id": "toolu_vrtx_011rnfExuyU5PR7xt9MMMqh5",
+      "content": "{\"results\": [{\"task_index\": 0, \"status\": \"completed\", \"summary\": \"The `/etc/passwd` file contains **19 lines**.\", \"api_calls\": 2, \"duration_seconds\": 1.75, \"model\": \"anthropic/claude-haiku-4-5\", \"exit_reason\": \"completed\", \"truncated\": false, \"tokens\": {\"input\": 18390, \"output\": 75}, \"tool_trace\": [{\"tool\": \"terminal\", \"args_bytes\": 32, \"input_summary\": {\"argument_keys\": [\"command\"], \"targets\": {}}, \"result_bytes\": 59, \"status\": \"ok\"}], \"cost_usd\": 0.0, \"cost_status\": \"unknown\", \"live_transcript\": \"/data/.hermes/profiles/ctx-43dfb10cf273393c/cache/delegation/live/deleg_eeb6a91f/task-0.log\"}, {\"task_index\": 1, \"status\": \"completed\", \"summary\": \"The output of `uname -s` is **Linux**.\", \"api_calls\": 2, \"duration_seconds\": 1.89, \"model\": \"anthropic/claude-haiku-4-5\", \"exit_reason\": \"completed\", \"truncated\": false, \"tokens\": {\"input\": 18373, \"output\": 71}, \"tool_trace\": [{\"tool\": \"terminal\", \"args_bytes\": 23, \"input_summary\": {\"argument_keys\": [\"command\"], \"targets\": {}}, \"result_bytes\": 50, \"status\": \"ok\"}], \"cost_usd\": 0.0, \"cost_status\": \"unknown\", \"live_transcript\": \"/data/.hermes/profiles/ctx-43dfb10cf273393c/cache/delegation/live/deleg_eeb6a91f/task-1.log\"}], \"total_duration_seconds\": 2.17, \"live_transcripts\": [\"/data/.hermes/profiles/ctx-43dfb10cf273393c/cache/delegation/live/deleg_eeb6a91f/task-0.log\", \"/data/.hermes/profiles/ctx-43dfb10cf273393c/cache/delegation/live/deleg_eeb6a91f/task-1.log\"], \"note\": \"background=true is not available in this session — it cannot receive a detached subagent result after the turn ends (a finite chat using -Q, --oneshot, or non-TTY stdio, `hermes -z`, a cron job, a Kanban worker, or a stateless HTTP endpoint). The subagent(s) ran SYNCHRONOUSLY and the result is included above.\"}",
+      "subagent_trajectory_ref": [
+       {
+        "trajectory_id": "20261128_065711_fb9877"
+       }
+      ]
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 13061,
+    "cached_tokens": 0,
+    "completion_tokens": 112,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 13058
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:57:14.476142Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 445,
+    "cached_tokens": 0,
+    "completion_tokens": 17,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:57:13.717181Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "Task 0: 19 lines, Task 1: Linux",
+   "metrics": {
+    "prompt_tokens": 13794,
+    "cached_tokens": 13058,
+    "completion_tokens": 17,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "subagent_trajectories": [
+  {
+   "schema_version": "ATIF-v1.8",
+   "trajectory_id": "20261128_065711_fb9877",
+   "agent": {
+    "name": "sa-0-8bd7223c",
+    "version": "unknown"
+   },
+   "steps": [
+    {
+     "step_id": 1,
+     "timestamp": "2026-11-28T06:57:11.864253Z",
+     "source": "agent",
+     "model_name": "anthropic/claude-haiku-4-5",
+     "message": "",
+     "tool_calls": [
+      {
+       "tool_call_id": "toolu_vrtx_01BdVWm5rXxkyqSBV7tMK3Rq",
+       "function_name": "terminal",
+       "arguments": {
+        "command": "wc -l /etc/passwd"
+       }
+      }
+     ],
+     "observation": {
+      "results": [
+       {
+        "source_call_id": "toolu_vrtx_01BdVWm5rXxkyqSBV7tMK3Rq",
+        "content": "{\"output\": \"19 /etc/passwd\", \"exit_code\": 0, \"error\": null}",
+        "extra": {
+         "agentenv": {
+          "exit_code": 0
+         }
+        }
+       }
+      ]
+     },
+     "metrics": {
+      "prompt_tokens": 9148,
+      "cached_tokens": 0,
+      "completion_tokens": 59,
+      "extra": {
+       "agentenv": {
+        "cache_write_tokens": 9145
+       }
+      }
+     },
+     "llm_call_count": 1
+    },
+    {
+     "step_id": 2,
+     "timestamp": "2026-11-28T06:57:12.908917Z",
+     "source": "agent",
+     "model_name": "anthropic/claude-haiku-4-5",
+     "message": "The `/etc/passwd` file contains **19 lines**.",
+     "metrics": {
+      "prompt_tokens": 9242,
+      "cached_tokens": 9145,
+      "completion_tokens": 16,
+      "extra": {
+       "agentenv": {
+        "cache_write_tokens": 0
+       }
+      }
+     },
+     "llm_call_count": 1
+    }
+   ]
+  },
+  {
+   "schema_version": "ATIF-v1.8",
+   "trajectory_id": "20261128_065711_cf3164",
+   "agent": {
+    "name": "sa-1-576c1453",
+    "version": "unknown"
+   },
+   "steps": [
+    {
+     "step_id": 1,
+     "timestamp": "2026-11-28T06:57:11.871069Z",
+     "source": "agent",
+     "model_name": "anthropic/claude-haiku-4-5",
+     "message": "",
+     "tool_calls": [
+      {
+       "tool_call_id": "toolu_vrtx_01SzLAdy8EgcEkMzdJdbhzmh",
+       "function_name": "terminal",
+       "arguments": {
+        "command": "uname -s"
+       }
+      }
+     ],
+     "observation": {
+      "results": [
+       {
+        "source_call_id": "toolu_vrtx_01SzLAdy8EgcEkMzdJdbhzmh",
+        "content": "{\"output\": \"Linux\", \"exit_code\": 0, \"error\": null}",
+        "extra": {
+         "agentenv": {
+          "exit_code": 0
+         }
+        }
+       }
+      ]
+     },
+     "metrics": {
+      "prompt_tokens": 9144,
+      "cached_tokens": 0,
+      "completion_tokens": 55,
+      "extra": {
+       "agentenv": {
+        "cache_write_tokens": 9141
+       }
+      }
+     },
+     "llm_call_count": 1
+    },
+    {
+     "step_id": 2,
+     "timestamp": "2026-11-28T06:57:12.915360Z",
+     "source": "agent",
+     "model_name": "anthropic/claude-haiku-4-5",
+     "message": "The output of `uname -s` is **Linux**.",
+     "metrics": {
+      "prompt_tokens": 9229,
+      "cached_tokens": 9141,
+      "completion_tokens": 16,
+      "extra": {
+       "agentenv": {
+        "cache_write_tokens": 0
+       }
+      }
+     },
+     "llm_call_count": 1
+    }
+   ]
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 64063,
+  "total_completion_tokens": 292,
+  "total_cached_tokens": 31344,
+  "total_steps": 4,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 31344
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "hermes-hook-events/1",
+   "adapter": {
+    "name": "hermes-hook-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

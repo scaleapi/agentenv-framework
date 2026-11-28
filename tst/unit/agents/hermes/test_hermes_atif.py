@@ -322,6 +322,93 @@ def test_a_tool_error_keeps_its_status():
     assert profile_of(result_)["status"] == "error"
 
 
+def test_a_batch_entry_hermes_refused_before_its_pre_tool_call_is_a_call_in_its_step_with_the_refusal():
+    """As recorded: the second entry of a tool search batch lacked an argument, so Hermes' scope check refused it before
+    the pre_tool_call hook, under an id of its own and the wrapper's name; the model's next call answers the refusal."""
+    wrapper = {"calls": [{"name": "mcp__browser__browser_navigate", "arguments": {"url": "https://example.com"}},
+                         {"name": "mcp__browser__browser_take_screenshot", "arguments": {}}]}
+    refusal = '{"error": "tool_call to \'mcp__browser__browser_take_screenshot\' is missing required argument(s): scale"}'
+    feed = Feed().start().call("Opening it.", calls=[("toolu_1", "tool_call", wrapper)])
+    feed.pre("toolu_1", "mcp__browser__browser_navigate", {"url": "https://example.com"})
+    feed.post("toolu_1", "mcp__browser__browser_navigate", '{"result": "### Page"}')
+    feed.event("post_tool_call", api_request_id="", tool_call_id="call_a7b35e644820", tool_name="tool_call",
+               result=refusal, status="blocked", duration_ms=0, error_type="tool_scope_block", error_message="missing")
+    feed.call("With the scale, then.").answer("With the scale, then.").end()
+    kit = run(feed)
+    first = agent_steps(kit.document)[0]
+
+    assert [(call["tool_call_id"], call["function_name"], call["arguments"]) for call in first["tool_calls"]] == [
+        ("toolu_1", "mcp__browser__browser_navigate", {"url": "https://example.com"}),
+        ("call_a7b35e644820", "tool_call", {})]
+    refused = first["observation"]["results"][1]
+    assert (refused["source_call_id"], refused["content"], profile_of(refused)["status"]) == (
+        "call_a7b35e644820", refusal, "error")
+    assert "unmatched" not in profile_of(kit.document)
+
+
+def test_a_call_hermes_refused_under_the_models_own_id_keeps_the_models_name_and_arguments():
+    feed = Feed().start().call(calls=[("toolu_1", "terminal", {"command": "rm -rf /"}), ("toolu_2", "terminal", {})])
+    feed.event("post_tool_call", api_request_id="", tool_call_id="toolu_1", tool_name="terminal",
+               result='{"error": "Blocked by guardrail policy"}', status="blocked", duration_ms=0,
+               error_type="guardrail_block", error_message="Blocked by guardrail policy")
+    feed.shell("toolu_2", "ls", "hello.py")
+    feed.call("I won't.").answer("I won't.").end()
+    first = agent_steps(run(feed).document)[0]
+
+    assert [(call["tool_call_id"], call["arguments"]) for call in first["tool_calls"]] == [
+        ("toolu_1", {"command": "rm -rf /"}), ("toolu_2", {"command": "ls"})]
+    assert [r["source_call_id"] for r in first["observation"]["results"]] == ["toolu_1", "toolu_2"]
+
+
+def test_an_execute_code_scripts_own_tool_calls_which_carry_no_id_are_left_to_the_native_log():
+    """As Hermes runs a script's calls through its tool RPC: handle_function_call with no ids, so each fires
+    pre_tool_call with an empty id, session and turn, and no post_tool_call; the script's own result says what it
+    made."""
+    code = {"code": "from hermes_tools import terminal, read_file\nterminal('ls'); read_file('a.py')"}
+    feed = Feed().start().call(calls=[("toolu_1", "execute_code", code)]).pre("toolu_1", "execute_code", code)
+    for name in ("terminal", "read_file"):
+        feed.records.append(Fed({"type": "pre_tool_call", "timestamp": int(feed.now() * 1000), "session_id": "",
+                                 "turn_id": "", "api_request_id": "", "tool_call_id": "", "tool_name": name,
+                                 "args": {}}))
+    feed.post("toolu_1", "execute_code", json.dumps({"status": "success", "output": "a.py\n", "tool_calls_made": 2}))
+    kit = run(feed.call("Done.").answer("Done.").end())
+
+    assert [call["tool_call_id"] for call in agent_steps(kit.document)[0]["tool_calls"]] == ["toolu_1"]
+    every_call_answered(kit.document)
+    assert profile_of(kit.document)["unmatched"] == {"pre_tool_call": 2}
+
+
+@pytest.mark.parametrize(("status", "expected"), [
+    ("ok", None), ("error", "error"), ("blocked", "error"), ("cancelled", "canceled"), ("timeout", "timeout")])
+def test_a_results_status_is_hermes_tool_executors_in_atifs_words(status, expected):
+    feed = Feed().start().call(calls=[("toolu_1", "terminal", {"command": "sleep 900"})]).pre("toolu_1")
+    feed.event("post_tool_call", api_request_id="", tool_call_id="toolu_1", tool_name="terminal", result="{}",
+               status=status, duration_ms=12)
+    (result_,) = agent_steps(run(feed.call("Stopped.").answer("Stopped.").end()).document)[0]["observation"]["results"]
+
+    assert profile_of(result_).get("status") == expected
+
+
+def test_a_screenshot_hermes_hands_the_model_by_its_cache_path_is_a_media_file_from_the_bytes_the_plugin_read():
+    """As recorded on the endpoint's route, which takes no images: the result names the cached file, and the model
+    reads it later through vision_analyze."""
+    image, path = png(), "/data/.hermes/profiles/ctx-1/cache/images/img_7d5bbce47a8d.png"
+    text = json.dumps({"result": f"### Result\n- [Screenshot of viewport](page.png)\nMEDIA:{path}"})
+    feed = Feed().start().call(calls=[("toolu_1", "mcp__browser__browser_take_screenshot", {"scale": "css"})])
+    feed.pre("toolu_1", "mcp__browser__browser_take_screenshot", {"scale": "css"})
+    feed.event("post_tool_call", api_request_id="", tool_call_id="toolu_1",
+               tool_name="mcp__browser__browser_take_screenshot", result=text, status="ok", duration_ms=51,
+               media=[{"path": path, "media_type": "image/png", "data": base64.b64encode(image).decode()}])
+    feed.call("Example Domain").answer("Example Domain").end()
+    kit = run(feed)
+
+    (result_,) = agent_steps(kit.document)[0]["observation"]["results"]
+    said, picture = result_["content"]
+    assert said == {"type": "text", "text": text}
+    assert picture["type"] == "image" and kit.media[picture["source"]["path"]] == image
+    assert profile_of(result_)["media"][picture["source"]["path"]]["width"] == 4
+
+
 def test_an_image_a_tool_hands_the_model_is_a_media_file_named_by_its_bytes():
     image = png()
     envelope = {"_multimodal": True, "text_summary": "screenshot", "content": [
@@ -475,6 +562,58 @@ def test_a_batchs_later_children_are_each_under_a_call_of_its_own_beside_the_one
     assert results[f"toolu_d:{second}"]["content"] == "root, agent"
     assert {r["subagent_trajectory_ref"][0]["trajectory_id"] for r in results.values()} == {first, second}
     assert_sums_to(kit.document, reported(feed))
+
+
+@pytest.mark.parametrize(("status", "expected"), [
+    ("completed", None), ("failed", "error"), ("error", "error"), ("interrupted", "canceled"), ("timeout", "timeout")])
+def test_a_batchs_later_child_ends_its_call_with_the_status_hermes_gave_it(status, expected):
+    """Hermes' delegation ends a child completed, failed, interrupted, or, when it raised or outran its timeout, error
+    or timeout (tools/delegate_tool_child_run.py)."""
+    first, second = "20261127_101530_c0ffee", "20261127_101531_beef00"
+    tasks = {"tasks": [{"goal": "count the lines"}, {"goal": "list the users"}]}
+    feed = Feed().start().call("Delegating both.", calls=[("toolu_d", "delegate_task", tasks)])
+    feed.pre("toolu_d", "delegate_task", tasks).spawn(first).spawn(second, "sa-1-5e6f7a8b", "list the users")
+    for child in (first, second):
+        sub = Feed.new_turn(child)
+        feed.call("19", usage=counts(9000, 5), session=child, turn=sub).answer("19", session=child, turn=sub)
+    feed.stop(first).stop(second, "", status)
+    feed.post("toolu_d", "delegate_task", json.dumps({"results": [{"summary": "19"}, {"status": status}]}))
+    step = agent_steps(run(feed.call("19").answer("19").end()).document)[0]
+
+    results = {r["source_call_id"]: r for r in step["observation"]["results"]}
+    assert profile_of(results[f"toolu_d:{second}"]).get("status") == expected
+
+
+def test_a_childs_events_after_a_compaction_rotated_its_session_stay_in_its_own_trajectory():
+    """Hermes moves a compacted transcript to a new session (agent/conversation_compression.py), and the child's later
+    events, and its subagent_stop, name that one."""
+    first, second, rotated = "20261127_101530_c0ffee", "20261127_101531_beef00", "20261127_101540_d00d00"
+    tasks = {"tasks": [{"goal": "count the lines"}, {"goal": "list the users"}]}
+    feed = Feed().start().call("Delegating both.", calls=[("toolu_d", "delegate_task", tasks)])
+    feed.pre("toolu_d", "delegate_task", tasks).spawn(first).spawn(second, "sa-1-5e6f7a8b", "list the users")
+    sub = Feed.new_turn(second)
+    feed.call(calls=[("toolu_c1", "terminal", {"command": "cat /etc/passwd"})], session=second, turn=sub)
+    feed.shell("toolu_c1", "cat /etc/passwd", "root:x:0:0", session=second, turn=sub)
+    feed.auxiliary("compression", counts(40000, 700), content="## Summary\nRead it.", session=second, turn=sub)
+    feed.event("post_compaction", session=rotated, turn=False, old_session_id=second, kind="summarize",
+               reason="pre_api", before_tokens=40000, after_tokens=3100)
+    feed.call(calls=[("toolu_c2", "terminal", {"command": "cut -d: -f1 /etc/passwd"})], session=rotated, turn=sub)
+    feed.shell("toolu_c2", "cut -d: -f1 /etc/passwd", "root", session=rotated, turn=sub)
+    feed.call("root, agent", session=rotated, turn=sub).answer("root, agent", session=rotated, turn=sub)
+    other = Feed.new_turn(first)
+    feed.call("19", usage=counts(9000, 5), session=first, turn=other).answer("19", session=first, turn=other)
+    feed.stop(first).stop(rotated, "root, agent")
+    feed.post("toolu_d", "delegate_task", json.dumps({"results": [{"summary": "19"}, {"summary": "root, agent"}]}))
+    kit = run(feed.call("19; root, agent").answer("19; root, agent").end())
+
+    assert set(subagents(kit.document)) == {first, second}
+    steps = agent_steps(subagents(kit.document)[second])
+    assert [call["tool_call_id"] for step in steps for call in step.get("tool_calls") or ()] == ["toolu_c1", "toolu_c2"]
+    assert [bool(profile_of(step).get("compaction")) for step in steps] == [False, True, False, False]
+    results = {r["source_call_id"]: r for r in agent_steps(kit.document)[0]["observation"]["results"]}
+    assert results[f"toolu_d:{second}"]["content"] == "root, agent"
+    assert_sums_to(kit.document, reported(feed))
+    every_call_answered(kit.document)
 
 
 def test_a_child_no_call_waits_for_is_left_to_the_native_log():

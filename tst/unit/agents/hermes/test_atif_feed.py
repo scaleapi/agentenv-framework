@@ -3,6 +3,7 @@ payloads (the assistant message whole, the request's start, auxiliary calls, chi
 records, fed only when a run prescribes atif/1."""
 from __future__ import annotations
 
+import base64
 import json
 import os
 from dataclasses import dataclass, field
@@ -108,6 +109,29 @@ def test_an_auxiliary_calls_event_keeps_its_counts_and_its_answers_text(hooks):
     assert {key: event[key] for key in ("aux_task", "model", "started_at", "content")} == {
         "aux_task": "compression", "model": MODEL, "started_at": 1795218900.25, "content": "## Summary"}
     assert event["usage"]["prompt_tokens"] == 40000 and "response" not in event and "error" not in event
+
+
+def test_a_tool_result_naming_an_image_in_hermes_media_cache_carries_its_bytes(hooks, monkeypatch, tmp_path):
+    """Hermes hands a route that takes no images an MCP screenshot as ``MEDIA:<path>`` alone, the file in its cache; a
+    path outside the cache, or to a file not an image, is left a path."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "cache" / "images").mkdir(parents=True)
+    shot = tmp_path / "cache" / "images" / "img_7d5bbce47a8d.png"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\nscreenshot")
+    (tmp_path / "cache" / "images" / "notes.txt").write_text("not an image")
+    (tmp_path / "state.png").write_bytes(b"\x89PNG\r\n\x1a\nprofile")
+    tags = "\n".join(f"MEDIA:{path}" for path in (shot, tmp_path / "cache/images/notes.txt", tmp_path / "state.png",
+                                                    tmp_path / "cache/images/gone.png", shot))
+    for output in (json.dumps({"result": f"### Result\n{tags}"}), '{"output": "5050", "exit_code": 0}'):
+        hooks.hooks["post_tool_call"](
+            tool_name="mcp__browser__browser_take_screenshot", args={"scale": "css"}, result=output, task_id="t",
+            session_id=SESSION, tool_call_id="toolu_1", turn_id=TURN, api_request_id=f"{TURN}:api:1", duration_ms=51,
+            status="ok", error_type=None, error_message=None, middleware_trace=[])
+    screenshot, shell = hooks.read()
+
+    assert screenshot["media"] == [{"path": str(shot), "media_type": "image/png",
+                                    "data": base64.b64encode(b"\x89PNG\r\n\x1a\nscreenshot").decode()}]
+    assert screenshot["result"].endswith(f"MEDIA:{shot}\"}}") and "media" not in shell
 
 
 def test_a_childs_start_names_its_session_and_its_parents(hooks):

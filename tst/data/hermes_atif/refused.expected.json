@@ -1,0 +1,67 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-hermes-refused",
+ "agent": {
+  "name": "Hermes Agent",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:56:21.616415Z",
+   "source": "user",
+   "message": "Reply with ok.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-hermes-refused",
+     "task_id": "0e513a5e-a218-4fef-9848-240927ad362e",
+     "message_id": "ca8c8042685d45969bd27510e237c9e0",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:56:27.977477Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "Error code: 400 - {'error': {'message': 'refused by the recording proxy', 'code': 400}}",
+      "code": "400"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:56:28.377922Z",
+   "source": "agent",
+   "message": "custom rejected this request as malformed, so the model didn't answer. Start a clean session with /new or switch models with /model; if it keeps happening, run `hermes doctor`.\n\nProvider said: HTTP 400: refused by the recording proxy",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "state": "failed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_steps": 3
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "hermes-hook-events/1",
+   "adapter": {
+    "name": "hermes-hook-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

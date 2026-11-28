@@ -2,14 +2,17 @@
 ATIF. A model call is one ``post_api_request``, with its model, its request's start, its usage (``prompt_tokens``
 counting the cache) and its assistant message whole; its calls are the ``pre_tool_call`` events of the tools Hermes ran,
 the tool search wrapper unwrapped and each entry of a connector batch its own, and their results the
-``post_tool_call`` events by call id. A call the model made that Hermes never ran is written when its step closes. A
-failed attempt, which Hermes retries itself, is a step with no model call holding the error.
+``post_tool_call`` events by call id, with the images a result names in Hermes' media cache, which the plugin reads. A
+call Hermes refused before its ``pre_tool_call`` hook, as a batch entry missing an argument, is its result's tool, in
+the step running tools; one the model made that Hermes never ran is written when its step closes; one an execute_code
+script made, which carries no id, is left to the native log. A failed attempt, which Hermes retries itself, is a step
+with no model call holding the error.
 
 An auxiliary call (a title, a compression, a vision analysis) is a step with its usage alone, written at its agent's
 next step, before a response not yet written, so the turn's last response stays its last step; a summary Hermes
 committed makes its compression call's step a compaction. A ``delegate_task`` child, its events under a session of its
-own, is a sub-agent under the call that spawned it; a batch's children past the first, which one call spawned, each
-under a call of its own. Two things only the server knows come as aux records (``turn``): the turn's reasoning effort,
+own and those a compaction rotates it to, is a sub-agent under the call that spawned it; a batch's children past the
+first, which one call spawned, each under a call of its own. Two things only the server knows come as aux records (``turn``): the turn's reasoning effort,
 and Hermes' cost when it priced the turn."""
 from __future__ import annotations
 
@@ -35,7 +38,11 @@ _COMPRESSION = "compression"
 _SUMMARIES = ("summarize", "micro_summarize")
 _COUNTS = (("prompt_tokens", "input_tokens"), ("output_tokens", "output_tokens"),
            ("cache_read_tokens", "cache_read_tokens"), ("cache_write_tokens", "cache_write_tokens"))
-_CHILD_STATUSES = {"completed": "ok", "interrupted": "canceled", "failed": "error"}
+#: A child's status, as Hermes' delegation writes it, in ATIF's words; any other is ``ok``.
+_CHILD_STATUSES = {"completed": "ok", "interrupted": "canceled", "failed": "error", "error": "error",
+                   "timeout": "timeout"}
+#: A post_tool_call's status, as Hermes' tool executor writes it, in ATIF's words; any other is ``ok``.
+_TOOL_STATUSES = {"error": "error", "blocked": "error", "cancelled": "canceled", "timeout": "timeout"}
 _DATA_URL = re.compile(r"data:(?P<type>[\w.+-]+/[\w.+-]+);base64,(?P<data>.*)", re.S)
 #: Where a child's events go when no delegate_task call is waiting for it: the native log alone.
 _UNPLACED = object()
@@ -157,6 +164,7 @@ class HermesAtif(Adapter):
         self._spawned: set[str] = set()
         self._fanned: dict[str, str] = {}
         self._unplaced: set[str] = set()
+        self._rotated: dict[str, str] = {}
 
     @aux(AUX, type="start")
     def started(self, record: dict[str, Any], turn: Any) -> None:
@@ -196,14 +204,16 @@ class HermesAtif(Adapter):
 
     @native(type="pre_tool_call")
     def tool_call(self, record: dict[str, Any], turn: Any) -> None:
-        agent = self._agent(record, turn)
+        """A call Hermes runs. One with no id, a call an execute_code script makes through Hermes' tool RPC, which no
+        session names and no event answers, is left to the native log; the script's own result says what it made."""
+        call_id, name = _string(record.get("tool_call_id")), _string(record.get("tool_name"))
+        agent = _UNPLACED if call_id is None or name is None else self._agent(record, turn)
         if agent is _UNPLACED:
             turn.unmatched(record)
             return
         state = self._agents[agent]
         if state.held is not None:
             self._write(agent, turn)
-        call_id, name = record["tool_call_id"], record["tool_name"]
         state.calls.pop(call_id, None)
         arguments = record.get("args")
         turn.tool_call(step=state.open, tool_call_id=call_id, function_name=name,
@@ -214,18 +224,37 @@ class HermesAtif(Adapter):
 
     @native(type="post_tool_call")
     def tool_result(self, record: dict[str, Any], turn: Any) -> None:
-        """A result, in its call's step; one whose call the copy doesn't hold, a child's it couldn't place, is left to
-        the native log."""
+        """A result, in its call's step. One with no ``pre_tool_call``, a call Hermes refused before that hook, is its
+        own call in its agent's step running tools; with no such step, or from a child the copy couldn't place, it is
+        left to the native log."""
         call_id = record.get("tool_call_id")
-        if call_id not in self._calls:
+        if call_id not in self._calls and not self._refused(record, turn):
             turn.unmatched(record)
             return
         for state in self._agents.values():
             if call_id in state.delegates:
                 state.delegates.remove(call_id)
-        turn.tool_result(source_call_id=call_id, content=_content(record.get("result"), turn),
-                         status="error" if record.get("status") == "error" else "ok", exit_code=_exit_code(record),
-                         time=_millis(record))
+        content = _content(record.get("result"), turn) + [turn.media(*image) for image in _cached(record)]
+        turn.tool_result(source_call_id=call_id, content=content, status=_TOOL_STATUSES.get(record.get("status"), "ok"),
+                         exit_code=_exit_code(record), time=_millis(record))
+
+    def _refused(self, record: dict[str, Any], turn: Any) -> bool:
+        """Write the call of a result Hermes gave without running its tool: the model's own call when the result keeps
+        its id, else one of Hermes' own, whose arguments no event holds."""
+        call_id, name = _string(record.get("tool_call_id")), _string(record.get("tool_name"))
+        agent = self._agent(record, turn)
+        if call_id is None or name is None or agent is _UNPLACED:
+            return False
+        state = self._agents[agent]
+        if state.held is not None:
+            self._write(agent, turn)
+        if state.open is None:
+            return False
+        name, arguments = state.calls.pop(call_id, (name, {}))
+        turn.tool_call(step=state.open, tool_call_id=call_id, function_name=name, arguments=arguments,
+                       time=_millis(record), agent=agent)
+        self._calls.add(call_id)
+        return True
 
     @native(type="post_llm_call")
     def answered(self, record: dict[str, Any], turn: Any) -> None:
@@ -248,11 +277,15 @@ class HermesAtif(Adapter):
 
     @native(type="post_compaction")
     def compacted(self, record: dict[str, Any], turn: Any) -> None:
-        """A summary Hermes committed: its compression call, the latest its agent made, becomes the compaction."""
+        """A compaction Hermes committed. One that rotated a child's session, ``old_session_id`` the one it left, has
+        the child's later events under the new one. A summary's compression call, the latest its agent made, becomes
+        the compaction."""
+        session = record.get("session_id")
+        agent = self._child(session) or self._child(record.get("old_session_id"))
+        if agent is not None and _string(session) and session != agent:
+            self._rotated[session] = agent
         if record.get("kind") not in _SUMMARIES:
             return
-        sessions = (record.get("session_id"), record.get("old_session_id"))
-        agent = next((session for session in sessions if session is not None and session in self._agents), None)
         held = next((call for call in reversed(self._agents[agent].aux) if call.compaction is None
                      and call.record.get("aux_task") == _COMPRESSION and not call.record.get("error")), None)
         if held is None:
@@ -268,16 +301,16 @@ class HermesAtif(Adapter):
     @native(type="subagent_start")
     def spawned(self, record: dict[str, Any], turn: Any) -> None:
         child = _string(record.get("child_session_id"))
-        if child is None or child in self._agents or child in self._unplaced:
+        if child is None or self._child(child) is not None or child in self._unplaced:
             return
-        parent = record.get("parent_session_id")
-        self._declare(child, parent if parent is not None and parent in self._agents else None,
-                      _string(record.get("child_subagent_id")), _string(record.get("child_goal")), turn)
+        self._declare(child, self._child(record.get("parent_session_id")), _string(record.get("child_subagent_id")),
+                      _string(record.get("child_goal")), turn)
 
     @native(type="subagent_stop")
     def stopped(self, record: dict[str, Any], turn: Any) -> None:
-        """A batch's later child ended: its own call's result, the summary Hermes hands its parent."""
-        call_id = self._fanned.pop(record.get("child_session_id"), None)
+        """A batch's later child ended: its own call's result, the summary Hermes hands its parent. The child is named
+        by its session at its end."""
+        call_id = self._fanned.pop(self._child(record.get("child_session_id")), None)
         if call_id is not None:
             turn.tool_result(source_call_id=call_id, text=_string(record.get("child_summary")) or "",
                              status=_CHILD_STATUSES.get(record.get("child_status"), "ok"), time=_millis(record))
@@ -301,8 +334,8 @@ class HermesAtif(Adapter):
         auxiliary call no turn made; else the child its session names, declared on its first event when no
         subagent_start declared it."""
         turn_id, session = record.get("turn_id"), record.get("session_id")
-        if _string(session) and session in self._agents:
-            return session
+        if (child := self._child(session)) is not None:
+            return child
         if self._main is None or not turn_id or turn_id == self._main:
             if turn_id and _string(session):
                 self._session = session
@@ -312,6 +345,13 @@ class HermesAtif(Adapter):
         if session == self._session:
             return None
         return self._declare(session, None, None, None, turn)
+
+    def _child(self, session: Any) -> str | None:
+        """The declared child a session is, by its first session or one a compaction rotated it to."""
+        if not _string(session):
+            return None
+        session = self._rotated.get(session, session)
+        return session if session in self._agents else None
 
     def _declare(self, child: str, parent: str | None, name: str | None, goal: str | None, turn: Any) -> Any:
         """Declare ``child`` under its parent's first delegate_task call still waiting with no child, else under a call
@@ -453,6 +493,12 @@ def _content(result: Any, turn: Any) -> list[Any]:
         else:
             parts.append(json.dumps(block, ensure_ascii=False))
     return parts or [""]
+
+
+def _cached(record: dict[str, Any]) -> list[tuple[bytes, str]]:
+    """The images the plugin read from Hermes' media cache for a result that names them only by ``MEDIA:<path>``, as
+    Hermes hands images to a model whose route takes none: ``media``, each ``{path, media_type, data}``, base64."""
+    return [(base64.b64decode(entry["data"]), entry["media_type"]) for entry in record.get("media") or ()]
 
 
 def _image(url: Any) -> tuple[bytes, str] | None:

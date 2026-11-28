@@ -1,8 +1,11 @@
 """Hermes' spec for ``record.py``: Claude Haiku through Chat Completions at the endpoint, each context's Hermes profile
 (its sessions database, memory and SOUL.md) under ``/data/.hermes/profiles``, and three scenarios of its own: a high
 reasoning effort, which Hermes sends as ``--reasoning``; a ``delegate_task`` child, whose events come under a session
-of its own; and a batch of two children from one call. ``hermes --version`` prints its release first (the release the
-Dockerfile's ``HERMES_COMMIT`` pins, which the adapter's ``TESTED_WITH`` names), then its install's details."""
+of its own; and a batch of two children from one call. ``hermes --version`` prints ``Hermes Agent vunknown
+(<release date>)`` first, as the image drops the checkout's history Hermes would read its tag from: the date, which
+``make_fixtures.py`` keeps as the fixtures' ``cli``, is the release the Dockerfile's ``HERMES_COMMIT`` pins and the
+adapter's ``TESTED_WITH`` names. With claude-haiku-4-5 at that endpoint a high effort gives no reasoning back, and the
+common ``retried`` scenario's two failures reach no model call: its events hold no failed attempt."""
 
 SPEC = {
     "image": "agentenv-hermes",

@@ -1,0 +1,143 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-hermes-retried",
+ "agent": {
+  "name": "Hermes Agent",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:56:30.066553Z",
+   "source": "user",
+   "message": "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-hermes-retried",
+     "task_id": "bd253468-fb88-4f02-acea-dce46ff860a6",
+     "message_id": "db10ad1a0c654bc69aef32acb82020b6",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:56:36.435240Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01Hf4RLQYnpScEyk6dFNSHte",
+     "function_name": "terminal",
+     "arguments": {
+      "command": "echo first"
+     }
+    },
+    {
+     "tool_call_id": "toolu_vrtx_01A6xX95PTNYakXdKwYuvL7h",
+     "function_name": "terminal",
+     "arguments": {
+      "command": "echo second"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01Hf4RLQYnpScEyk6dFNSHte",
+      "content": "{\"output\": \"first\", \"exit_code\": 0, \"error\": null}",
+      "extra": {
+       "agentenv": {
+        "exit_code": 0
+       }
+      }
+     },
+     {
+      "source_call_id": "toolu_vrtx_01A6xX95PTNYakXdKwYuvL7h",
+      "content": "{\"output\": \"second\", \"exit_code\": 0, \"error\": null}",
+      "extra": {
+       "agentenv": {
+        "exit_code": 0
+       }
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 13045,
+    "cached_tokens": 0,
+    "completion_tokens": 88,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:56:38.682425Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 425,
+    "cached_tokens": 0,
+    "completion_tokens": 14,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:56:37.947041Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "first second",
+   "metrics": {
+    "prompt_tokens": 13228,
+    "cached_tokens": 0,
+    "completion_tokens": 5,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 26698,
+  "total_completion_tokens": 107,
+  "total_cached_tokens": 0,
+  "total_steps": 4,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 0
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "hermes-hook-events/1",
+   "adapter": {
+    "name": "hermes-hook-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}
