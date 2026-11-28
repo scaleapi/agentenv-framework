@@ -6,7 +6,6 @@ import pytest
 from agent_env.config import configure, get_config, reset_config
 from agent_env.eval import instance_store
 from agent_env.eval.instance import (
-    Attempt,
     EvalInstance,
     EvalInstanceStatus,
     EvalSettings,
@@ -63,7 +62,7 @@ def test_a_local_evals_records_stay_in_its_namespaces_store(root, namespace, rou
     router, configured = routed
     instance = _instance(root)
     instance_store.create_eval_instance(instance, planned_slots(instance.id, [(f"{root}/tasks/a", 1)], k=2))
-    instance_store.record_slot(instance.id, f"{root}/tasks/a@1#2", SlotState.GRADED, {"result": "passed"})
+    instance_store.record_slot(instance.id, f"{root}/tasks/a@1#2", SlotState.NOT_RUN_BUDGET, run_id=None)
 
     local = router.namespaces[namespace]
     assert instance.id.startswith(root)
@@ -72,22 +71,36 @@ def test_a_local_evals_records_stay_in_its_namespaces_store(root, namespace, rou
         f"{root}/tasks/a@1#1", f"{root}/tasks/a@1#2"}
     for collection in (instance_store.EVAL_INSTANCES_COLLECTION, instance_store.EVAL_SLOTS_COLLECTION):
         assert configured.query(collection, Filter()) == []
-    assert instance_store.get_eval_instance(instance.id).slots_rev == 1
+    assert instance_store.get_eval_instance(instance.id).slots_rev == 2
 
 
-def test_a_slot_lives_with_its_eval_instance_whatever_namespace_its_task_is_in(routed):
+def test_a_slot_naming_a_task_in_another_local_namespace_is_refused_and_nothing_is_written(routed):
     router, configured = routed
     instance = _instance(LOCAL_EVAL)
-    hub_task = f"{HUB_EVAL}/tasks/a"
-    instance_store.create_eval_instance(instance, planned_slots(instance.id, [(hub_task, 1)], k=1))
-    instance_store.append_attempt(instance.id, f"{hub_task}@1#1", Attempt(
-        run_id="run-1", instance_id=f"{hub_task}-abcd1234", submitted_at="2026-11-27T10:00:00+00:00"))
+    with pytest.raises(ValueError):
+        instance_store.create_eval_instance(instance, planned_slots(instance.id, [(f"{HUB_EVAL}/tasks/a", 1)], k=1))
+    stores = [configured, *(store for store in router.namespaces.values() if store.path.exists())]
+    for collection in (instance_store.EVAL_INSTANCES_COLLECTION, instance_store.EVAL_SLOTS_COLLECTION):
+        assert all(store.query(collection, Filter()) == [] for store in stores)
 
-    assert {doc["id"] for doc in router.namespaces["local"].query(instance_store.EVAL_SLOTS_COLLECTION, Filter())} == {
-        f"{hub_task}@1#1"}
-    hub = router.namespaces["hf"]
-    assert not hub.path.exists() or hub.query(instance_store.EVAL_SLOTS_COLLECTION, Filter()) == []
-    assert configured.query(instance_store.EVAL_SLOTS_COLLECTION, Filter()) == []
+
+def test_a_summary_taken_during_a_slot_write_is_stamped_older_than_the_write(sqlite, monkeypatch):
+    """A reader between a write's first count and its landing sees the old slot and a slots_rev the write moves past."""
+    instance = _instance(REGISTRY_EVAL)
+    instance_store.create_eval_instance(instance, planned_slots(instance.id, [("tasks/a", 1)], k=1))
+    taken = []
+    write = instance_store.compare_and_swap
+
+    def a_reader_first(*args, **kwargs):
+        taken.append(instance_store.read_slots(instance.id))
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(instance_store, "compare_and_swap", a_reader_first)
+    instance_store.record_slot(instance.id, "tasks/a@1#1", SlotState.CANCELLED, run_id=None)
+
+    [(stamp, slots)] = taken
+    assert slots[0].state is SlotState.PLANNED
+    assert instance_store.read_slots(instance.id)[0] > stamp
 
 
 def test_a_registry_evals_records_go_to_the_configured_store(routed):

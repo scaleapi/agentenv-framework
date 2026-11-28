@@ -65,7 +65,8 @@ from agent_env.store.object_store.object_store import (
 )
 
 # The fields a run-time document names its owner by: the first holding a local id places it in that id's namespace.
-# An eval slot names its task too, so its eval instance comes first and the slot lives where the instance does.
+# An eval slot names both its eval instance and its task, which the instance store keeps in one namespace; the
+# instance comes first all the same, so a slot is placed by the record it belongs to.
 _OWNER_FIELDS = ("eval_instance_id", "id", "instance_id", "task_id", "task_instance_id", "env_id", "agent_id")
 _LOCAL_REPOSITORY_PREFIX = f"{LOCAL_NAMESPACE}/"
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")

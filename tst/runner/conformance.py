@@ -118,7 +118,7 @@ async def a_run_outlives_its_submitter_only_when_the_runner_says_so(runner):
     outlive their submitter finishes the run, so an eval resumed later reattaches to it; any other never finishes it,
     so the eval submits it again."""
     task = _put(Step(id="a", version=None, nap=OUTLIVED_NAP_SECONDS))
-    run_id = await _submit_from_a_process_that_exits(task)
+    run_id = await _submit_from_a_process_that_exits(task, runner)
     if runner.runs_outlive_submitter:
         assert (await _until_ended(runner, run_id)).status is RunStatus.COMPLETED
     else:
@@ -159,20 +159,24 @@ async def _until_ended(runner, run_id):
     return await _until(runner, run_id, lambda record: record.status.is_terminal)
 
 
-async def _submit_from_a_process_that_exits(task) -> str:
-    """The run id a second process submitted ``task`` under before it exited."""
+async def _submit_from_a_process_that_exits(task, runner) -> str:
+    """The run id a second process submitted ``task`` under, with a runner of ``runner``'s type, before it exited."""
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, (str(_REPO), os.environ.get("PYTHONPATH"))))}
     process = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "tst.runner.conformance", task.id, str(task.version),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
+        sys.executable, "-m", "tst.runner.conformance", type(runner).__module__, type(runner).__qualname__, task.id,
+        str(task.version), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
     out, err = await asyncio.wait_for(process.communicate(), ENDED_WITHIN_SECONDS)
     assert process.returncode == 0, err.decode()[-2000:]
     return next(line for line in out.decode().splitlines() if line.startswith(_RUN_ID)).removeprefix(_RUN_ID)
 
 
-async def _submit_and_leave(task_id: str, task_version: int) -> None:
-    """Submit with the configured runner, wait until the run starts, then exit at once: no ``stop()``, no cleanup."""
+async def _submit_and_leave(module: str, qualname: str, task_id: str, task_version: int) -> None:
+    """Submit with the configured runner, which must be of the class the caller named, wait until the run starts,
+    then exit at once: no ``stop()``, no cleanup."""
     runner = get_config().get_runner()
+    named = f"{module}:{qualname}"
+    if f"{type(runner).__module__}:{type(runner).__qualname__}" != named:
+        sys.exit(f"the configured [runner] is {type(runner).__qualname__}, not {named}: configure the runner under test")
     handle = await runner.submit(task_id, task_version)
     await _until(runner, handle.run_id, lambda record: record.status is not RunStatus.QUEUED)
     print(f"{_RUN_ID}{handle.run_id}", flush=True)
@@ -199,4 +203,4 @@ async def _until(runner, run_id, done):
 
 if __name__ == "__main__":
     register_step()
-    asyncio.run(_submit_and_leave(sys.argv[1], int(sys.argv[2])))
+    asyncio.run(_submit_and_leave(sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])))

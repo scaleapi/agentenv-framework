@@ -1,6 +1,10 @@
 """An eval instance: one run of an eval, recorded before its first submit so that it can be shown, resumed, regraded
 and compared. Its slots, one per task and replica, are documents of their own, each listing the attempts (task runs)
-that filled it in order; a slot's result is its last attempt's."""
+that filled it in order; a slot's result is its last attempt's.
+
+Reading is lenient and writing strict: a status, state, source kind or time this version doesn't know loads as stored,
+since a newer version may have written it to a store several versions share, and ``validate`` refuses one before
+``agent_env.eval.instance_store`` writes it."""
 
 from __future__ import annotations
 
@@ -56,6 +60,26 @@ def utc_timestamp(value: str) -> str:
     return when.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
+def _known(enum: type[StrEnum], value: Any) -> Any:
+    """``value`` as a member of ``enum``, or as given when this version doesn't know it."""
+    try:
+        return enum(value)
+    except ValueError:
+        return value
+
+
+def _read_time(value: Any) -> Any:
+    try:
+        return utc_timestamp(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _refuse_unknown(enum: type[StrEnum], value: Any, what: str) -> None:
+    if not isinstance(value, enum):
+        raise ValueError(f"unknown {what} {value!r}; known: {', '.join(enum)}")
+
+
 def slot_id(task_id: str, task_version: int, replica: int) -> str:
     """``task_id@version#replica``, the replica counted from 1."""
     if replica < 1:
@@ -75,7 +99,7 @@ class EvalSource:
     tasks: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        self.kind = SourceKind(self.kind)
+        self.kind = _known(SourceKind, self.kind)
 
     def to_dict(self) -> dict:
         return {"kind": str(self.kind), "eval_id": self.eval_id, "eval_version": self.eval_version, "ref": self.ref,
@@ -178,8 +202,15 @@ class EvalInstance:
     rev: int = 0
 
     def __post_init__(self) -> None:
-        self.status = EvalInstanceStatus(self.status)
-        self.created_at = utc_timestamp(self.created_at)
+        self.status = _known(EvalInstanceStatus, self.status)
+        self.created_at = _read_time(self.created_at)
+
+    def validate(self) -> None:
+        """Refuse a status or source kind this version doesn't know, or a ``created_at`` that isn't ISO 8601 with its
+        offset, before the record is written."""
+        _refuse_unknown(EvalInstanceStatus, self.status, "eval instance status")
+        _refuse_unknown(SourceKind, self.source.kind, "eval source kind")
+        utc_timestamp(self.created_at)
 
     @property
     def eval_id(self) -> Optional[str]:
@@ -245,7 +276,8 @@ class Attempt:
 @dataclass
 class Slot:
     """One planned run of an eval instance: a task at its pinned version and a replica. ``attempts`` are the task runs
-    submitted for it, oldest first, and ``result`` is the last one's, as its task instance recorded it."""
+    submitted for it, oldest first, and ``result`` is the last one's, as its task instance recorded it. ``id`` is
+    ``task_id@version#replica`` when planned, and as stored when read."""
 
     eval_instance_id: str
     task_id: str
@@ -255,10 +287,16 @@ class Slot:
     attempts: list[Attempt] = field(default_factory=list)
     result: Optional[dict[str, Any]] = None
     rev: int = 0
+    id: Optional[str] = None
 
     def __post_init__(self) -> None:
-        self.state = SlotState(self.state)
-        self.id = slot_id(self.task_id, self.task_version, self.replica)
+        self.state = _known(SlotState, self.state)
+        if self.id is None:
+            self.id = slot_id(self.task_id, self.task_version, self.replica)
+
+    def validate(self) -> None:
+        """Refuse a state this version doesn't know before the slot is written."""
+        _refuse_unknown(SlotState, self.state, "slot state")
 
     def to_dict(self) -> dict:
         return {
@@ -284,6 +322,7 @@ class Slot:
             attempts=[Attempt.from_dict(attempt) for attempt in data.get("attempts") or []],
             result=data.get("result"),
             rev=data.get("rev", 0),
+            id=data.get("id"),
         )
 
 

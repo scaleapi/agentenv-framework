@@ -65,32 +65,66 @@ def an_attempt_is_added_after_the_earlier_ones_and_never_replaces_them(root):
     first, second = _attempt("first"), _attempt("second")
 
     assert instance_store.append_attempt(instance.id, slot, first).attempts == [first]
-    instance_store.record_slot(instance.id, slot, SlotState.INTERRUPTED, {"result": "ungraded", "cause": "interrupted"})
+    instance_store.record_slot(instance.id, slot, SlotState.INTERRUPTED, {"result": "ungraded", "cause": "interrupted"},
+                               run_id=first.run_id)
     instance_store.append_attempt(instance.id, slot, second)
-    graded = instance_store.record_slot(instance.id, slot, SlotState.GRADED, {"result": "passed"})
+    graded = instance_store.record_slot(instance.id, slot, SlotState.GRADED, {"result": "passed"}, run_id=second.run_id)
 
     assert graded.attempts == [first, second]
     assert (graded.state, graded.result) == (SlotState.GRADED, {"result": "passed"})
     assert instance_store.get_slot(instance.id, slot) == graded
-    assert instance_store.get_eval_instance(instance.id).slots_rev == 4
 
 
-def a_slot_write_counts_in_slots_rev_before_it_lands(root):
-    """So a summary stamped with an older slots_rev reads as stale even when the write after the count never came."""
+def an_attempt_sent_again_is_not_added_twice(root):
+    """As when a write that landed is retried because its answer was lost."""
     instance = created_instance(root)
+    slot = f"{root}/tasks/a@2#1"
+    first = _attempt("first")
+    instance_store.append_attempt(instance.id, slot, first)
+    assert instance_store.append_attempt(instance.id, slot, first).attempts == [first]
+
+
+def a_result_lands_only_for_the_slots_last_attempt(root):
+    """So a late result from an attempt a retry replaced never overwrites the slot."""
+    instance = created_instance(root, k=2)
+    slot, untouched = f"{root}/tasks/a@2#1", f"{root}/tasks/a@2#2"
+    first, second = _attempt("first"), _attempt("second")
+    instance_store.append_attempt(instance.id, slot, first)
+    instance_store.append_attempt(instance.id, slot, second)
+
+    for stale in (first.run_id, None, "run-never"):
+        with pytest.raises(instance_store.StaleAttemptError):
+            instance_store.record_slot(instance.id, slot, SlotState.GRADED, {"result": "passed"}, run_id=stale)
+    assert instance_store.get_slot(instance.id, slot).state is SlotState.RUNNING
+    with pytest.raises(instance_store.StaleAttemptError):
+        instance_store.record_slot(instance.id, untouched, SlotState.GRADED, run_id=first.run_id)
+    assert instance_store.record_slot(instance.id, untouched, SlotState.NOT_RUN_BUDGET, run_id=None).state is (
+        SlotState.NOT_RUN_BUDGET)
+
+
+def a_slot_write_is_counted_before_and_after_it_lands(root):
+    """A summary takes slots_rev before the slots, so one taken during a write, or before a driver stopped between the
+    steps of one, is stamped older than slots_rev."""
+    instance = created_instance(root)
+    slot = f"{root}/tasks/a@2#1"
+    assert instance_store.read_slots(instance.id)[0] == 0
+    instance_store.append_attempt(instance.id, slot, _attempt("first"))
+    assert instance_store.read_slots(instance.id)[0] == 2
     with pytest.raises(LookupError):
-        instance_store.record_slot(instance.id, f"{root}/tasks/never@1#1", SlotState.GRADED)
-    assert instance_store.get_eval_instance(instance.id).slots_rev == 1
+        instance_store.record_slot(instance.id, f"{root}/tasks/never@1#1", SlotState.GRADED, run_id=None)
+    assert instance_store.get_eval_instance(instance.id).slots_rev == 3
     with pytest.raises(LookupError):
-        instance_store.append_attempt(f"{root}-missing0", f"{root}/tasks/a@2#1", _attempt("x"))
+        instance_store.append_attempt(f"{root}-missing0", slot, _attempt("x"))
+    with pytest.raises(LookupError):
+        instance_store.read_slots(f"{root}-missing0")
 
 
 def each_eval_instance_keeps_its_own_slots(root):
     first, second = created_instance(root), created_instance(root)
     slot = f"{root}/tasks/a@2#1"
-    instance_store.record_slot(first.id, slot, SlotState.GRADED, {"result": "passed"})
+    instance_store.record_slot(first.id, slot, SlotState.CANCELLED, run_id=None)
 
-    assert instance_store.get_slot(first.id, slot).state is SlotState.GRADED
+    assert instance_store.get_slot(first.id, slot).state is SlotState.CANCELLED
     assert instance_store.get_slot(second.id, slot).state is SlotState.PLANNED
     assert {s.eval_instance_id for s in instance_store.get_slots(second.id)} == {second.id}
 
@@ -135,18 +169,44 @@ def a_different_record_under_a_recorded_id_is_refused_and_writes_nothing(root):
     assert len(instance_store.get_slot(instance.id, slot).attempts) == 1
 
 
+def a_record_is_stored_as_json_so_a_retry_compares_equal(root):
+    """Tuples become lists and keys text on every backend alike; what JSON can't hold is refused before any write."""
+    instance = _instance(root, intent_lock={"pins": ("a", 1)}, settings=EvalSettings(k=1, overrides={7: "seven"}))
+    slots = planned_slots(instance.id, [(f"{root}/tasks/a", 2)], k=1)
+    instance_store.create_eval_instance(instance, slots)
+    instance_store.create_eval_instance(instance, slots)
+    stored = instance_store.get_eval_instance(instance.id)
+    assert (stored.intent_lock, stored.settings.overrides) == ({"pins": ["a", 1]}, {"7": "seven"})
+
+    for unstorable in ({"seen": {"a"}}, {"score": float("nan")}):
+        bad = _instance(root, intent_lock=unstorable)
+        with pytest.raises((TypeError, ValueError)):
+            instance_store.create_eval_instance(bad, planned_slots(bad.id, [(f"{root}/tasks/a", 2)], k=1))
+        assert instance_store.get_eval_instance(bad.id) is None
+
+
+def a_slot_must_name_a_task_in_its_eval_instances_namespace(root):
+    """So an eval's records all live in one store, the local one for an @local or @hf eval."""
+    elsewhere = "tasks/a" if root.startswith("@") else "@local/~/elsewhere/tasks/a"
+    instance = _instance(root)
+    with pytest.raises(ValueError):
+        instance_store.create_eval_instance(instance, planned_slots(instance.id, [(elsewhere, 1)], k=1))
+    assert instance_store.get_eval_instance(instance.id) is None
+
+
 def per_run_secrets_are_not_stored(root):
     """As the run index strips them from a run's overrides; a bare env: or secret: reference names one and is kept."""
-    overrides = {"litellm_api_key": "sk-not-stored", "judge_litellm_api_key": "env:JUDGE_KEY", "judge_model": "m"}
+    overrides = {"litellm_api_key": "sk-not-stored", "judge_litellm_api_key": "env:JUDGE_KEY", "judge_model": "m",
+                 "keys": ({"usersim_api_key": "sk-not-stored"},)}
     instance = _instance(root, settings=EvalSettings(k=1, overrides=overrides))
     instance_store.create_eval_instance(instance, planned_slots(instance.id, [(f"{root}/tasks/a", 2)], k=1))
     instance_store.create_eval_instance(instance, planned_slots(instance.id, [(f"{root}/tasks/a", 2)], k=1))
-    graded = instance_store.record_slot(instance.id, f"{root}/tasks/a@2#1", SlotState.GRADED,
-                                        {"result": "passed", "overrides": {"usersim_api_key": "sk-not-stored"}})
+    graded = instance_store.record_slot(instance.id, f"{root}/tasks/a@2#1", SlotState.CANCELLED,
+                                        {"overrides": {"usersim_api_key": "sk-not-stored"}}, run_id=None)
 
     stored = instance_store.get_eval_instance(instance.id).settings.overrides
-    assert stored == {"judge_litellm_api_key": "env:JUDGE_KEY", "judge_model": "m"}
-    assert graded.result == {"result": "passed", "overrides": {}}
+    assert stored == {"judge_litellm_api_key": "env:JUDGE_KEY", "judge_model": "m", "keys": [{}]}
+    assert graded.result == {"overrides": {}}
 
 
 def eval_instances_list_newest_first_and_by_eval(root):
@@ -163,35 +223,59 @@ def eval_instances_list_newest_first_and_by_eval(root):
     assert [i.created_at for i in every] == sorted((i.created_at for i in every), reverse=True)
 
 
-def an_unknown_status_or_slot_state_is_refused(root):
-    with pytest.raises(ValueError):
-        _instance(root, status="done")
-    with pytest.raises(ValueError):
-        Slot(f"{root}-x", f"{root}/tasks/a", 2, 1, state="passed")
-    with pytest.raises(ValueError):
-        EvalSource(kind="folder")
-    for when in ("2026-11-27T10:00:00", "yesterday"):
+def an_unknown_status_state_kind_or_time_is_refused_when_written(root):
+    known = _instance(root)
+    unknown = [
+        (_instance(root, status="done"), None),
+        (_instance(root, source=EvalSource(kind="folder", eval_id=root)), None),
+        (_instance(root, created_at="2026-11-27T10:00:00"), None),
+        (_instance(root, created_at="yesterday"), None),
+        (known, Slot(known.id, f"{root}/tasks/a", 2, 1, state="passed")),
+    ]
+    for instance, slot in unknown:
         with pytest.raises(ValueError):
-            _instance(root, created_at=when)
+            instance_store.create_eval_instance(instance, [slot] if slot else [])
+        assert instance_store.get_eval_instance(instance.id) is None
     instance = created_instance(root)
     with pytest.raises(ValueError):
-        instance_store.record_slot(instance.id, f"{root}/tasks/a@2#1", "passed")
+        instance_store.record_slot(instance.id, f"{root}/tasks/a@2#1", "passed", run_id=None)
     assert instance_store.get_slot(instance.id, f"{root}/tasks/a@2#1").state is SlotState.PLANNED
-    with pytest.raises(ValueError):
-        EvalInstance.from_dict({**instance.to_dict(), "status": "done"})
+
+
+def a_record_a_newer_version_wrote_still_loads(root):
+    """Several versions share a store, so values this one doesn't know load as stored rather than failing a listing."""
+    instance = created_instance(root)
+    docs = get_config().get_document_store()
+    newer = {**instance.to_dict(), "id": f"{instance.id}n", "status": "paused", "created_at": "2026-11-27 10:00:00",
+             "source": {**instance.source.to_dict(), "kind": "workspace"}}
+    docs.insert(instance_store.EVAL_INSTANCES_COLLECTION, newer)
+    docs.insert(instance_store.EVAL_SLOTS_COLLECTION, {
+        **planned_slots(newer["id"], [(f"{root}/tasks/a", 2)], k=1)[0].to_dict(), "id": "a newer scheme's id",
+        "state": "queued"})
+
+    loaded = instance_store.get_eval_instance(newer["id"])
+    assert (loaded.status, loaded.source.kind, loaded.created_at) == ("paused", "workspace", "2026-11-27 10:00:00")
+    assert newer["id"] in [i.id for i in instance_store.list_eval_instances(eval_id=root)]
+    [slot] = instance_store.get_slots(newer["id"])
+    assert (slot.id, slot.state) == ("a newer scheme's id", "queued")
 
 
 CASES = [
     an_eval_instance_and_its_slots_round_trip,
     slot_ids_name_the_task_version_and_replica_counted_from_one,
     an_attempt_is_added_after_the_earlier_ones_and_never_replaces_them,
-    a_slot_write_counts_in_slots_rev_before_it_lands,
+    an_attempt_sent_again_is_not_added_twice,
+    a_result_lands_only_for_the_slots_last_attempt,
+    a_slot_write_is_counted_before_and_after_it_lands,
     each_eval_instance_keeps_its_own_slots,
     a_creation_stopped_partway_is_not_seen_and_running_it_again_finishes_it,
     a_different_record_under_a_recorded_id_is_refused_and_writes_nothing,
+    a_record_is_stored_as_json_so_a_retry_compares_equal,
+    a_slot_must_name_a_task_in_its_eval_instances_namespace,
     per_run_secrets_are_not_stored,
     eval_instances_list_newest_first_and_by_eval,
-    an_unknown_status_or_slot_state_is_refused,
+    an_unknown_status_state_kind_or_time_is_refused_when_written,
+    a_record_a_newer_version_wrote_still_loads,
 ]
 
 

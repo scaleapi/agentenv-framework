@@ -34,14 +34,18 @@ class DetachedRunner(Runner):
     runs_outlive_submitter = True
     retries_infra = True
 
+    def __init__(self) -> None:
+        self.workers: list[subprocess.Popen] = []
+
     async def submit(self, task_id, task_version=None, *, metadata=None, **_) -> RunHandle:
         record = run_store.insert_run(RunRecord(
             run_id=f"detached-{uuid.uuid4().hex}", runner=self.type, task_id=task_id, task_version=task_version,
             instance_id=new_instance_id(task_id)))
         env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, (str(conformance._REPO),
                                                                            os.environ.get("PYTHONPATH"))))}
-        subprocess.Popen([sys.executable, "-m", "tst.unit.runner.declarations_test", record.run_id], env=env,
-                         start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.workers.append(subprocess.Popen(
+            [sys.executable, "-m", "tst.unit.runner.declarations_test", record.run_id], env=env,
+            start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         return RunHandle(run_id=record.run_id, instance_id=record.instance_id)
 
     async def status(self, run_id):
@@ -78,6 +82,12 @@ def detached_runner(local_stores, tmp_path, monkeypatch):
     runner = get_config().get_runner()
     assert isinstance(runner, DetachedRunner)
     yield runner
+    for worker in runner.workers:
+        try:
+            worker.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            worker.kill()
+            worker.wait()
     reset_config()
 
 
