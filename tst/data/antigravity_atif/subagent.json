@@ -1,0 +1,431 @@
+{
+ "scenario": "subagent",
+ "cli": "0.1.24",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-antigravity-subagent",
+    "task_id": "d0301bb3-ae79-4349-8e09-dba4268fb1d8",
+    "message_id": "d20f1b5bc7a44bbea1ec929cdbace418",
+    "agent_name": "Antigravity",
+    "agent_version": "1.0.0",
+    "agent_model": "gemini-2.5-flash",
+    "started_at": "2026-11-28T07:00:02.052789Z",
+    "inbound": [
+     "Use your invoke_subagent tool to have a subagent create notes.txt holding the word forty-two and report back, then run `cat notes.txt` yourself and reply with only what it prints."
+    ],
+    "state": "completed",
+    "final": [
+     "forty-two\n\nTask complete. A file named [notes.txt](file:///app/notes.txt) has been created in the current directory with the content \"forty-two\".\n\nforty-two"
+    ],
+    "ended_at": "2026-11-28T07:00:12.124415Z"
+   },
+   "native": [
+    {
+     "type": "ToolCall",
+     "name": "invoke_subagent",
+     "args": {},
+     "id": "ef97eaefe73ffc669b20a3556c295a5d:1",
+     "step_id": "ef97eaefe73ffc669b20a3556c295a5d:1",
+     "canonical_path": null,
+     "server_name": null
+    },
+    {
+     "kind": "tool_result",
+     "name": "invoke_subagent",
+     "id": "call_9e5b0d00430c475482f90bc0",
+     "step_id": "ef97eaefe73ffc669b20a3556c295a5d:2",
+     "result": "Subagent File Creation",
+     "error": null,
+     "server_name": null,
+     "call_ref": "ef97eaefe73ffc669b20a3556c295a5d:1"
+    },
+    {
+     "type": "ToolCall",
+     "name": "run_command",
+     "args": {
+      "command_line": "cat notes.txt",
+      "working_dir": "/app"
+     },
+     "id": "ef97eaefe73ffc669b20a3556c295a5d:2",
+     "step_id": "ef97eaefe73ffc669b20a3556c295a5d:2",
+     "canonical_path": null,
+     "server_name": null
+    },
+    {
+     "kind": "tool_result",
+     "name": "run_command",
+     "id": "call_fcd34071c1dd4c71ba165c60",
+     "step_id": "ef97eaefe73ffc669b20a3556c295a5d:4",
+     "result": {
+      "output": "cat: notes.txt: No such file or directory\r\n"
+     },
+     "error": null,
+     "server_name": null,
+     "call_ref": "ef97eaefe73ffc669b20a3556c295a5d:2"
+    },
+    {
+     "type": "ToolCall",
+     "name": "edit_file",
+     "args": {
+      "file_path": "/app/notes.txt"
+     },
+     "id": "576eae4cd9534c6b55bb8a6a5f78927d:1",
+     "step_id": "576eae4cd9534c6b55bb8a6a5f78927d:1",
+     "canonical_path": "/app/notes.txt",
+     "server_name": null
+    },
+    {
+     "type": "ToolCall",
+     "name": "edit_file",
+     "args": {
+      "file_path": "/app/notes.txt"
+     },
+     "id": "ef97eaefe73ffc669b20a3556c295a5d:3",
+     "step_id": "ef97eaefe73ffc669b20a3556c295a5d:3",
+     "canonical_path": "/app/notes.txt",
+     "server_name": null
+    },
+    {
+     "type": "ToolCall",
+     "name": "run_command",
+     "args": {
+      "command_line": "cat notes.txt",
+      "working_dir": "/app"
+     },
+     "id": "ef97eaefe73ffc669b20a3556c295a5d:4",
+     "step_id": "ef97eaefe73ffc669b20a3556c295a5d:4",
+     "canonical_path": null,
+     "server_name": null
+    },
+    {
+     "kind": "tool_result",
+     "name": "run_command",
+     "id": "call_363349fbf6c24b4eaeec2bb9",
+     "step_id": "ef97eaefe73ffc669b20a3556c295a5d:8",
+     "result": {
+      "output": "forty-two\r\n"
+     },
+     "error": null,
+     "server_name": null,
+     "call_ref": "ef97eaefe73ffc669b20a3556c295a5d:4"
+    },
+    {
+     "type": "Text",
+     "step_index": 5,
+     "text": "forty-two\n"
+    },
+    {
+     "type": "Text",
+     "step_index": 4,
+     "text": "Task complete. A file named [notes.txt](file:///app/notes.txt) has been created in the current directory with the content \"forty-two\"."
+    },
+    {
+     "type": "Text",
+     "step_index": 7,
+     "text": "forty-two"
+    },
+    {
+     "kind": "tool_result",
+     "name": "create_file",
+     "id": "call_c8cdfb6f84f94c26a4820a47",
+     "step_id": "576eae4cd9534c6b55bb8a6a5f78927d:2",
+     "result": "File creation",
+     "error": null,
+     "server_name": null,
+     "call_ref": null
+    },
+    {
+     "kind": "tool_result",
+     "name": "create_file",
+     "id": "call_d138d726435f4cc898fa84f8",
+     "step_id": "ef97eaefe73ffc669b20a3556c295a5d:6",
+     "result": "Create notes.txt",
+     "error": null,
+     "server_name": null,
+     "call_ref": null
+    }
+   ],
+   "aux": [
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 1,
+      "conversation": "3c634b6ad63f3f48",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T07:00:02.190Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T07:00:02.189Z",
+      "timestamp": "2026-11-28T07:00:04.519Z",
+      "seq": 1
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 2,
+      "conversation": "3c634b6ad63f3f48",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T07:00:04.550Z"
+     },
+     "after": 2
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 3,
+      "conversation": "83cb514b4d23f9cf",
+      "turn": false,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T07:00:04.564Z"
+     },
+     "after": 2
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T07:00:04.549Z",
+      "timestamp": "2026-11-28T07:00:05.890Z",
+      "seq": 2
+     },
+     "after": 2
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 4,
+      "conversation": "3c634b6ad63f3f48",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T07:00:05.903Z"
+     },
+     "after": 4
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T07:00:04.564Z",
+      "timestamp": "2026-11-28T07:00:06.349Z",
+      "seq": 3
+     },
+     "after": 4
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 5,
+      "conversation": "83cb514b4d23f9cf",
+      "turn": false,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T07:00:06.358Z"
+     },
+     "after": 5
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T07:00:05.902Z",
+      "timestamp": "2026-11-28T07:00:07.393Z",
+      "seq": 4
+     },
+     "after": 5
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 6,
+      "conversation": "3c634b6ad63f3f48",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T07:00:07.403Z"
+     },
+     "after": 6
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T07:00:06.357Z",
+      "timestamp": "2026-11-28T07:00:07.690Z",
+      "seq": 5
+     },
+     "after": 6
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 7,
+      "conversation": "83cb514b4d23f9cf",
+      "turn": false,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T07:00:07.697Z"
+     },
+     "after": 6
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T07:00:07.402Z",
+      "timestamp": "2026-11-28T07:00:08.710Z",
+      "seq": 6
+     },
+     "after": 6
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 8,
+      "conversation": "3c634b6ad63f3f48",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T07:00:08.723Z"
+     },
+     "after": 8
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T07:00:07.697Z",
+      "timestamp": "2026-11-28T07:00:09.587Z",
+      "seq": 7
+     },
+     "after": 8
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 9,
+      "conversation": "83cb514b4d23f9cf",
+      "turn": false,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T07:00:09.596Z"
+     },
+     "after": 8
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T07:00:08.723Z",
+      "timestamp": "2026-11-28T07:00:10.056Z",
+      "seq": 8
+     },
+     "after": 8
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 10,
+      "conversation": "3c634b6ad63f3f48",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T07:00:10.064Z"
+     },
+     "after": 8
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T07:00:09.595Z",
+      "timestamp": "2026-11-28T07:00:10.942Z",
+      "seq": 9
+     },
+     "after": 9
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T07:00:10.063Z",
+      "timestamp": "2026-11-28T07:00:12.073Z",
+      "seq": 10
+     },
+     "after": 10
+    }
+   ],
+   "usage": {
+    "tool_call_count": 5,
+    "provider_details": {
+     "model_calls": 10,
+     "unreported_calls": 10
+    }
+   }
+  }
+ ]
+}

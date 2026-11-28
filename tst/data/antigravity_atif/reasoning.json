@@ -1,0 +1,70 @@
+{
+ "scenario": "reasoning",
+ "cli": "0.1.24",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-antigravity-reasoning",
+    "task_id": "67601f81-1e4e-4761-a707-5c1c9f9bdb66",
+    "message_id": "0de89f0a6aef401aa36d7dbeb216b387",
+    "agent_name": "Antigravity",
+    "agent_version": "1.0.0",
+    "agent_model": "gemini-2.5-flash",
+    "started_at": "2026-11-28T07:00:15.591734Z",
+    "inbound": [
+     "Think it through, then reply with only the 20th Fibonacci number, counting F(1) = F(2) = 1."
+    ],
+    "state": "completed",
+    "final": [
+     "6765"
+    ],
+    "ended_at": "2026-11-28T07:00:17.889443Z"
+   },
+   "native": [
+    {
+     "type": "Text",
+     "step_index": 1,
+     "text": "6765"
+    }
+   ],
+   "aux": [
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 1,
+      "conversation": "342f57f88ecb7443",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "reasoning_effort": "high",
+      "started": "2026-11-28T07:00:15.727Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T07:00:15.726Z",
+      "timestamp": "2026-11-28T07:00:17.868Z",
+      "seq": 1
+     },
+     "after": 0
+    }
+   ],
+   "usage": {
+    "tool_call_count": 0,
+    "provider_details": {
+     "model_calls": 1,
+     "unreported_calls": 1
+    }
+   }
+  }
+ ]
+}

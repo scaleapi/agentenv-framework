@@ -1,0 +1,359 @@
+{
+ "scenario": "coding",
+ "cli": "0.1.24",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-antigravity-coding",
+    "task_id": "c6e0df03-fa93-4dc8-b796-fcaaffbaa6d5",
+    "message_id": "2ce01905b68f46a4babdd6ff27a88e59",
+    "agent_name": "Antigravity",
+    "agent_version": "1.0.0",
+    "agent_model": "gemini-2.5-flash",
+    "started_at": "2026-11-28T06:59:12.878836Z",
+    "inbound": [
+     "Create hello.py that prints the sum of the integers 1 to 100, run it with python3, and reply with only the number it prints."
+    ],
+    "state": "completed",
+    "final": [
+     "5050"
+    ],
+    "ended_at": "2026-11-28T06:59:17.708491Z"
+   },
+   "native": [
+    {
+     "type": "ToolCall",
+     "name": "edit_file",
+     "args": {
+      "file_path": "/app/hello.py"
+     },
+     "id": "776149fe0db66d5ab57ac7d61f21b3ca:2",
+     "step_id": "776149fe0db66d5ab57ac7d61f21b3ca:2",
+     "canonical_path": "/app/hello.py",
+     "server_name": null
+    },
+    {
+     "type": "ToolCall",
+     "name": "run_command",
+     "args": {
+      "command_line": "python3 hello.py",
+      "working_dir": "/app"
+     },
+     "id": "776149fe0db66d5ab57ac7d61f21b3ca:3",
+     "step_id": "776149fe0db66d5ab57ac7d61f21b3ca:3",
+     "canonical_path": null,
+     "server_name": null
+    },
+    {
+     "kind": "tool_result",
+     "name": "run_command",
+     "id": "call_62bb812f4bd541f8a1f5cef8",
+     "step_id": "776149fe0db66d5ab57ac7d61f21b3ca:6",
+     "result": {
+      "output": "5050\r\n"
+     },
+     "error": null,
+     "server_name": null,
+     "call_ref": "776149fe0db66d5ab57ac7d61f21b3ca:3"
+    },
+    {
+     "type": "Text",
+     "step_index": 4,
+     "text": "5050"
+    },
+    {
+     "kind": "tool_result",
+     "name": "create_file",
+     "id": "call_9b96e2a8f4894ec0aa4dace8",
+     "step_id": "776149fe0db66d5ab57ac7d61f21b3ca:4",
+     "result": "Create hello.py",
+     "error": null,
+     "server_name": null,
+     "call_ref": null
+    }
+   ],
+   "aux": [
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 1,
+      "conversation": "214ae9a48b8e46cc",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:13.017Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T06:59:13.016Z",
+      "timestamp": "2026-11-28T06:59:14.682Z",
+      "seq": 1
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 2,
+      "conversation": "214ae9a48b8e46cc",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:14.686Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T06:59:14.685Z",
+      "timestamp": "2026-11-28T06:59:15.945Z",
+      "seq": 2
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 3,
+      "conversation": "214ae9a48b8e46cc",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:15.955Z"
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T06:59:15.955Z",
+      "timestamp": "2026-11-28T06:59:16.912Z",
+      "seq": 3
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 4,
+      "conversation": "214ae9a48b8e46cc",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:16.934Z"
+     },
+     "after": 3
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T06:59:16.933Z",
+      "timestamp": "2026-11-28T06:59:17.674Z",
+      "seq": 4
+     },
+     "after": 3
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "provider_details": {
+     "model_calls": 4,
+     "unreported_calls": 4
+    }
+   }
+  },
+  {
+   "turn": {
+    "index": 1,
+    "context_id": "ctx-antigravity-coding",
+    "task_id": "a9f90b11-5c1e-4dc9-99b5-c6e36cf34933",
+    "message_id": "5d26635be75349d580e3a6267ddc4e12",
+    "agent_name": "Antigravity",
+    "agent_version": "1.0.0",
+    "agent_model": "gemini-2.5-flash",
+    "started_at": "2026-11-28T06:59:17.977267Z",
+    "inbound": [
+     "Now change it to sum 1 to 1000, run it again, and reply with only the number."
+    ],
+    "state": "completed",
+    "final": [
+     "500500"
+    ],
+    "ended_at": "2026-11-28T06:59:21.361549Z"
+   },
+   "native": [
+    {
+     "type": "ToolCall",
+     "name": "edit_file",
+     "args": {
+      "file_path": "/app/hello.py"
+     },
+     "id": "776149fe0db66d5ab57ac7d61f21b3ca:6",
+     "step_id": "776149fe0db66d5ab57ac7d61f21b3ca:6",
+     "canonical_path": "/app/hello.py",
+     "server_name": null
+    },
+    {
+     "kind": "tool_result",
+     "name": "edit_file",
+     "id": "call_4e7436410bf84b569ec56da7",
+     "step_id": "776149fe0db66d5ab57ac7d61f21b3ca:10",
+     "result": {
+      "summary": "Update sum range"
+     },
+     "error": null,
+     "server_name": null,
+     "call_ref": "776149fe0db66d5ab57ac7d61f21b3ca:6"
+    },
+    {
+     "type": "ToolCall",
+     "name": "run_command",
+     "args": {
+      "command_line": "python3 hello.py",
+      "working_dir": "/app"
+     },
+     "id": "776149fe0db66d5ab57ac7d61f21b3ca:7",
+     "step_id": "776149fe0db66d5ab57ac7d61f21b3ca:7",
+     "canonical_path": null,
+     "server_name": null
+    },
+    {
+     "kind": "tool_result",
+     "name": "run_command",
+     "id": "call_255c55aa434b43bb8167a5fa",
+     "step_id": "776149fe0db66d5ab57ac7d61f21b3ca:12",
+     "result": {
+      "output": "500500\r\n"
+     },
+     "error": null,
+     "server_name": null,
+     "call_ref": "776149fe0db66d5ab57ac7d61f21b3ca:7"
+    },
+    {
+     "type": "Text",
+     "step_index": 8,
+     "text": "500500"
+    }
+   ],
+   "aux": [
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 1,
+      "conversation": "214ae9a48b8e46cc",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:18.105Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T06:59:18.104Z",
+      "timestamp": "2026-11-28T06:59:19.527Z",
+      "seq": 1
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 2,
+      "conversation": "214ae9a48b8e46cc",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:19.539Z"
+     },
+     "after": 2
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T06:59:19.539Z",
+      "timestamp": "2026-11-28T06:59:20.632Z",
+      "seq": 2
+     },
+     "after": 2
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 3,
+      "conversation": "214ae9a48b8e46cc",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:20.656Z"
+     },
+     "after": 4
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T06:59:20.655Z",
+      "timestamp": "2026-11-28T06:59:21.330Z",
+      "seq": 3
+     },
+     "after": 4
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "provider_details": {
+     "model_calls": 3,
+     "unreported_calls": 3
+    }
+   }
+  }
+ ]
+}

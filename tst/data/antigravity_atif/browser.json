@@ -1,0 +1,165 @@
+{
+ "scenario": "browser",
+ "cli": "0.1.24",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-antigravity-browser",
+    "task_id": "765d8bf6-ad4c-4417-b24f-5db7e6e0cae6",
+    "message_id": "971fe33d49c446da8ec0c79475fa67e6",
+    "agent_name": "Antigravity",
+    "agent_version": "1.0.0",
+    "agent_model": "gemini-2.5-flash",
+    "started_at": "2026-11-28T06:59:25.489831Z",
+    "inbound": [
+     "Use the browser tools to open https://example.com, then call the screenshot tool with no filename so the image comes back to you, and reply with the main heading you see in it."
+    ],
+    "state": "completed",
+    "final": [
+     "The main heading I see in the screenshot is \"Example Domain\"."
+    ],
+    "ended_at": "2026-11-28T06:59:29.982600Z"
+   },
+   "native": [
+    {
+     "type": "ToolCall",
+     "name": "browser_navigate",
+     "args": {
+      "url": "https://example.com"
+     },
+     "id": "ad99691771d250283484df83d9422c38:1",
+     "step_id": "ad99691771d250283484df83d9422c38:1",
+     "canonical_path": null,
+     "server_name": "browser"
+    },
+    {
+     "kind": "tool_result",
+     "name": "browser_navigate",
+     "id": "call_6b6fc9a5467049cb84b7f954",
+     "step_id": "ad99691771d250283484df83d9422c38:2",
+     "result": "### Ran Playwright code\n```js\nawait page.goto('https://example.com');\n```\n### Page\n- Page URL: https://example.com/\n- Page Title: Example Domain\n### Snapshot\n- [Snapshot](../tmp/.playwright-mcp/page-2026-11-28T06-59-27-522Z.yml)",
+     "error": null,
+     "server_name": "browser",
+     "call_ref": "ad99691771d250283484df83d9422c38:1"
+    },
+    {
+     "type": "ToolCall",
+     "name": "browser_take_screenshot",
+     "args": {
+      "fullPage": false
+     },
+     "id": "ad99691771d250283484df83d9422c38:2",
+     "step_id": "ad99691771d250283484df83d9422c38:2",
+     "canonical_path": null,
+     "server_name": "browser"
+    },
+    {
+     "kind": "tool_result",
+     "name": "browser_take_screenshot",
+     "id": "call_f2fa37b387dc41cba39379c5",
+     "step_id": "ad99691771d250283484df83d9422c38:4",
+     "result": "### Result\n- [Screenshot of viewport](../tmp/.playwright-mcp/page-2026-11-28T06-59-28-747Z.png)\n### Ran Playwright code\n```js\n// Screenshot viewport and save it as ../tmp/.playwright-mcp/page-2026-11-28T06-59-28-747Z.png\nawait page.screenshot({\n  fullPage: false,\n  path: '../tmp/.playwright-mcp/page-2026-11-28T06-59-28-747Z.png',\n  scale: 'css',\n  type: 'png'\n});\n```\n[Resource offloaded to file:///data/.gemini/antigravity/brain/ad99691771d250283484df83d9422c38/.system_generated/steps/4/media_0.png]",
+     "error": null,
+     "server_name": "browser",
+     "call_ref": "ad99691771d250283484df83d9422c38:2"
+    },
+    {
+     "type": "Text",
+     "step_index": 3,
+     "text": "The main heading I see in the screenshot is \"Example Domain\"."
+    }
+   ],
+   "aux": [
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 1,
+      "conversation": "0e95258b7c3fabdb",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:25.659Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T06:59:25.658Z",
+      "timestamp": "2026-11-28T06:59:27.185Z",
+      "seq": 1
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 2,
+      "conversation": "0e95258b7c3fabdb",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:27.531Z"
+     },
+     "after": 2
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T06:59:27.530Z",
+      "timestamp": "2026-11-28T06:59:28.711Z",
+      "seq": 2
+     },
+     "after": 2
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_request",
+      "via": "relay",
+      "seq": 3,
+      "conversation": "0e95258b7c3fabdb",
+      "turn": true,
+      "model": "gemini-2.5-flash",
+      "started": "2026-11-28T06:59:28.759Z"
+     },
+     "after": 4
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "gemini-2.5-flash",
+      "status": 200,
+      "outcome": "unreported",
+      "started": "2026-11-28T06:59:28.758Z",
+      "timestamp": "2026-11-28T06:59:29.958Z",
+      "seq": 3
+     },
+     "after": 4
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "provider_details": {
+     "model_calls": 3,
+     "unreported_calls": 3
+    }
+   }
+  }
+ ]
+}
