@@ -229,7 +229,7 @@ class Gateway:
         self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
         self._control_token_children = frozenset(control_token_children)
         self._child_bearers = {name: f"Bearer {token}".encode() for name, token in (child_control_tokens or {}).items()}
-        self._token_paths = token_paths(internal_mcp_servers, self.website_urls, self.rest_proxy_urls,
+        self._token_paths = token_paths(self._mcp_endpoints, self.rest_proxy_urls,
                                         {*self._control_token_children, *self._child_bearers})
         self._consoles = dict(console_urls or {}) if control_token else {}
         self._console_session = ConsoleSession(control_token) if PGWEB_CONSOLE in self._consoles else None
@@ -1912,11 +1912,10 @@ def _normalized(path: str) -> str:
 
 def reserved_site_path(path: str, reserved: frozenset[str] = frozenset()) -> bool:
     """Whether ``path``, as a site's server would route it, is its data plane or its env card, or one of the paths
-    ``reserved`` names (``site_reserved_paths``), or under one, judged as the /svc guard judges (``canonical_path``)."""
-    normalized = canonical_path(path)
-    return normalized == canonical_path(WELL_KNOWN_PATH) or any(
-        normalized == base or normalized.startswith(base.rstrip("/") + "/")
-        for base in map(canonical_path, (RPC_PATH, *reserved)))
+    ``reserved`` names (``site_reserved_paths``), or under one, judged as the /svc guard judges
+    (``is_child_mcp_path``)."""
+    return canonical_path(path) == WELL_KNOWN_PATH or any(is_child_mcp_path(path, base)
+                                                          for base in (RPC_PATH, *reserved))
 
 
 def route_environment_name(key: str, base_url: str, servers: list[InternalMCPServer], *, website: bool) -> str:
@@ -1983,14 +1982,13 @@ def svc_route(path: str) -> tuple[str, str] | None:
     return child, rest
 
 
-def token_paths(servers: list[InternalMCPServer], website_urls: dict[str, str], rest_proxy_urls: dict[str, str],
+def token_paths(endpoints: Mapping[str, str], rest_proxy_urls: dict[str, str],
                 children: Collection[str]) -> dict[str, tuple[str, ...]]:
     """The paths under /svc/<key>/ that take the gateway's control token, by key: every backing server's data plane,
-    extensions included, its LEGACY_STATE_ROUTES, and an MCP server's own endpoint (``mcp_endpoints``), which skips
-    the gateway's trajectory and triggers. Only the ``children`` the gateway was told take a token of their own, a
-    multi env's computers, are left out; any other key is guarded whatever its name, a live site's that an MCP server
-    shares included."""
-    endpoints = mcp_endpoints(servers, website_urls, rest_proxy_urls)
+    extensions included, its LEGACY_STATE_ROUTES, and an MCP server's own endpoint as ``endpoints`` names it
+    (``mcp_endpoints``), which skips the gateway's trajectory and triggers. Only the ``children`` the gateway was told
+    take a token of their own, a multi env's computers, are left out; any other key is guarded whatever its name, a
+    live site's that an MCP server shares included."""
     return {key: (RPC_PATH, *LEGACY_STATE_ROUTES, *((endpoints[key],) if key in endpoints else ()))
             for key in rest_proxy_urls if key not in children}
 
