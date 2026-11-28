@@ -65,6 +65,11 @@ it hands the `exec` tool, which runs in `codex-code-mode-host`, another static b
 the clock as above, but JavaScript's own `Date` in that code reads real time; the `clock` namespace's `sleep` only
 waits, so it's unaffected.
 
+A sub-agent the model forks with the conversation so far (`spawn_agent` with `fork_turns`) on a model outside code
+mode, such as `gpt-5.5`, gets nothing done: the CLI gives it the parent's `spawn_agent` call in its history but not the
+collaboration tools, and the endpoint refuses its every call ("Portable encrypted function call arguments require their
+original tool declaration"). A sub-agent spawned without a fork, or forked in code mode, works.
+
 A `deploy_agent` `builtin_tools` selection turns the CLI's own tools off with `-c` overrides on the task's CLI alone;
 config.toml stays as it is. `{"disable": "*"}` turns off every setting below, `{"only": [...]}` every one but those whose
 tools it names, and a list to turn off those whose tools it names. A list names all of a setting's tools or none:
@@ -82,7 +87,7 @@ whatever `builtin_tools` selects.
 | `create_goal`, `get_goal`, `update_goal` | `features.goals=false` |
 | `web_search` | `web_search="disabled"` |
 
-No setting turns off `apply_patch`: a model's entry in Codex's model catalog offers it (every GPT model 0.162.1 ships
+No setting turns off `apply_patch`: a model's entry in Codex's model catalog offers it (every GPT model 0.172.0 ships
 with does). So a selection without it (`{"disable": "*"}`, a list naming it, or an `{"only": [...]}` that doesn't)
 writes a copy of the catalog the CLI would use, with `apply_patch_tool_type` null for every model, to
 `$CODEX_HOME/model_catalog_without_apply_patch.json`, and points the task's CLI at it with `-c model_catalog_json=...`.

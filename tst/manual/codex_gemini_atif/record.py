@@ -12,7 +12,7 @@ aux log and turn context), the atif/1 pages read live every second, and the CLI'
 Gemini's ``~/.gemini``). The scenarios: two coding turns of one conversation; a browser's screenshot returned to the
 model, through Playwright MCP beside the agent; and the endpoint refusing every call and failing calls that are then
 retried, through ``fault_proxy.py`` in a container of its own; for Codex also a high reasoning effort, a sub-agent, and
-a second turn's sub-agent forked with the conversation so far. They cost about a dollar. Needs Docker; ``mcr.microsoft.com/playwright/mcp`` is pulled
+a second turn's sub-agent forked with the conversation so far, on gpt-6.2-astra. They cost about a dollar. Needs Docker; ``mcr.microsoft.com/playwright/mcp`` is pulled
 for the browser scenario.
 
 The key is never written: every text is masked, and a copied file holding it is dropped. Then ``make_fixtures.py``
@@ -61,7 +61,9 @@ SCENARIOS = {
     "subagent": {"agents": ["codex"], "prompts": [
         "Spawn a sub-agent and have it run `wc -l /etc/passwd` and report the count back to you. Then reply with only "
         "that number."]},
-    "forked": {"agents": ["codex"], "prompts": [
+    # On a model outside the CLI's code mode, such as gpt-5.5, Codex 0.172.0 forks the sub-agent with the parent's
+    # spawn_agent call in its history but without the collaboration tools, and the endpoint refuses its every call.
+    "forked": {"agents": ["codex"], "config": {"model": "gpt-6.2-astra"}, "prompts": [
         "Run `echo one` with your shell tool and reply with only its output.",
         "Spawn a sub-agent forked with this conversation's full history (all turns), have it run `echo two` with its "
         "shell tool and report the output back, then reply with only that output."]},

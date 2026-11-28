@@ -1,17 +1,17 @@
 {
  "scenario": "retried",
- "cli": "0.162.1",
+ "cli": "0.172.0",
  "turns": [
   {
    "turn": {
     "index": 0,
     "context_id": "ctx-codex-retried",
-    "task_id": "8283a85d-1938-4c92-9f30-758852514c0e",
-    "message_id": "d924e37e9ea04718bdccf9fcfe1046c7",
+    "task_id": "e66ea040-d3e6-4a39-a1c1-d50e585cb84c",
+    "message_id": "b5715d409bcd41de95871984997691e5",
     "agent_name": "Codex",
     "agent_version": "1.0.0",
     "agent_model": "gpt-5.5",
-    "started_at": "2026-11-26T04:36:24.467805Z",
+    "started_at": "2026-11-28T05:58:21.354325Z",
     "inbound": [
      "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
     ],
@@ -19,23 +19,23 @@
     "final": [
      "first second"
     ],
-    "ended_at": "2026-11-26T04:36:36.470464Z",
+    "ended_at": "2026-11-28T05:58:33.690569Z",
     "data": [
      {
       "data": {
        "tool_call_count": 2,
        "cli_attempts": 2,
        "token_usage": {
-        "input_tokens": 40348,
-        "cached_input_tokens": 29824,
+        "input_tokens": 41064,
+        "cached_input_tokens": 40064,
         "cache_write_input_tokens": 0,
-        "output_tokens": 56,
+        "output_tokens": 55,
         "reasoning_output_tokens": 0
        },
        "warnings": [
-        "{\"type\": \"error\", \"message\": \"Reconnecting... 1/2 (unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:40081/4468d3291d9c9c5ed3fcb8a62232639e/openai/v1/responses)\", \"timestamp\": \"2026-11-26T04:36:26.781+00:00\"}",
-        "{\"type\": \"error\", \"message\": \"Reconnecting... 2/2 (unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:40081/4468d3291d9c9c5ed3fcb8a62232639e/openai/v1/responses)\", \"timestamp\": \"2026-11-26T04:36:27.614+00:00\"}",
-        "{\"type\": \"error\", \"message\": \"unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:40081/4468d3291d9c9c5ed3fcb8a62232639e/openai/v1/responses\", \"timestamp\": \"2026-11-26T04:36:28.638+00:00\"}"
+        "{\"type\": \"error\", \"message\": \"Reconnecting... 1/2 (unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:43029/a8e4bbe16f0849d2abd4f61293c3509f/openai/v1/responses)\", \"timestamp\": \"2026-11-28T05:58:23.773+00:00\"}",
+        "{\"type\": \"error\", \"message\": \"Reconnecting... 2/2 (unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:43029/a8e4bbe16f0849d2abd4f61293c3509f/openai/v1/responses)\", \"timestamp\": \"2026-11-28T05:58:24.608+00:00\"}",
+        "{\"type\": \"error\", \"message\": \"unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:43029/a8e4bbe16f0849d2abd4f61293c3509f/openai/v1/responses\", \"timestamp\": \"2026-11-28T05:58:25.607+00:00\"}"
        ]
       }
      }
@@ -44,12 +44,12 @@
    "native": [
     {
      "type": "thread.started",
-     "thread_id": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
-     "timestamp": "2026-11-26T04:36:24.933+00:00"
+     "thread_id": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
+     "timestamp": "2026-11-28T05:58:21.826+00:00"
     },
     {
      "type": "turn.started",
-     "timestamp": "2026-11-26T04:36:24.965+00:00"
+     "timestamp": "2026-11-28T05:58:21.875+00:00"
     },
     {
      "type": "item.started",
@@ -61,7 +61,7 @@
       "exit_code": null,
       "status": "in_progress"
      },
-     "timestamp": "2026-11-26T04:36:26.158+00:00"
+     "timestamp": "2026-11-28T05:58:23.145+00:00"
     },
     {
      "type": "item.completed",
@@ -73,38 +73,38 @@
       "exit_code": 0,
       "status": "completed"
      },
-     "timestamp": "2026-11-26T04:36:26.160+00:00"
+     "timestamp": "2026-11-28T05:58:23.145+00:00"
     },
     {
      "type": "error",
-     "message": "Reconnecting... 1/2 (unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:40081/4468d3291d9c9c5ed3fcb8a62232639e/openai/v1/responses)",
-     "timestamp": "2026-11-26T04:36:26.781+00:00"
+     "message": "Reconnecting... 1/2 (unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:43029/a8e4bbe16f0849d2abd4f61293c3509f/openai/v1/responses)",
+     "timestamp": "2026-11-28T05:58:23.773+00:00"
     },
     {
      "type": "error",
-     "message": "Reconnecting... 2/2 (unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:40081/4468d3291d9c9c5ed3fcb8a62232639e/openai/v1/responses)",
-     "timestamp": "2026-11-26T04:36:27.614+00:00"
+     "message": "Reconnecting... 2/2 (unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:43029/a8e4bbe16f0849d2abd4f61293c3509f/openai/v1/responses)",
+     "timestamp": "2026-11-28T05:58:24.608+00:00"
     },
     {
      "type": "error",
-     "message": "unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:40081/4468d3291d9c9c5ed3fcb8a62232639e/openai/v1/responses",
-     "timestamp": "2026-11-26T04:36:28.638+00:00"
+     "message": "unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:43029/a8e4bbe16f0849d2abd4f61293c3509f/openai/v1/responses",
+     "timestamp": "2026-11-28T05:58:25.607+00:00"
     },
     {
      "type": "turn.failed",
      "error": {
-      "message": "unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:40081/4468d3291d9c9c5ed3fcb8a62232639e/openai/v1/responses"
+      "message": "unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:43029/a8e4bbe16f0849d2abd4f61293c3509f/openai/v1/responses"
      },
-     "timestamp": "2026-11-26T04:36:28.644+00:00"
+     "timestamp": "2026-11-28T05:58:25.614+00:00"
     },
     {
      "type": "thread.started",
-     "thread_id": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
-     "timestamp": "2026-11-26T04:36:34.018+00:00"
+     "thread_id": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
+     "timestamp": "2026-11-28T05:58:30.957+00:00"
     },
     {
      "type": "turn.started",
-     "timestamp": "2026-11-26T04:36:34.031+00:00"
+     "timestamp": "2026-11-28T05:58:30.968+00:00"
     },
     {
      "type": "item.started",
@@ -116,7 +116,7 @@
       "exit_code": null,
       "status": "in_progress"
      },
-     "timestamp": "2026-11-26T04:36:35.252+00:00"
+     "timestamp": "2026-11-28T05:58:32.246+00:00"
     },
     {
      "type": "item.completed",
@@ -128,7 +128,7 @@
       "exit_code": 0,
       "status": "completed"
      },
-     "timestamp": "2026-11-26T04:36:35.254+00:00"
+     "timestamp": "2026-11-28T05:58:32.247+00:00"
     },
     {
      "type": "item.completed",
@@ -137,30 +137,30 @@
       "type": "agent_message",
       "text": "first second"
      },
-     "timestamp": "2026-11-26T04:36:36.367+00:00"
+     "timestamp": "2026-11-28T05:58:33.601+00:00"
     },
     {
      "type": "turn.completed",
      "usage": {
-      "input_tokens": 40348,
-      "cached_input_tokens": 29824,
+      "input_tokens": 41064,
+      "cached_input_tokens": 40064,
       "cache_write_input_tokens": 0,
-      "output_tokens": 56,
+      "output_tokens": 55,
       "reasoning_output_tokens": 0
      },
-     "timestamp": "2026-11-26T04:36:36.378+00:00"
+     "timestamp": "2026-11-28T05:58:33.609+00:00"
     },
     {
      "type": "agentenv.usage",
      "usage": {
-      "input_tokens": 40348,
-      "cached_input_tokens": 29824,
+      "input_tokens": 41064,
+      "cached_input_tokens": 40064,
       "cache_write_input_tokens": 0,
-      "output_tokens": 56,
+      "output_tokens": 55,
       "reasoning_output_tokens": 0
      },
      "model_requests": 3,
-     "timestamp": "2026-11-26T04:36:36.469+00:00"
+     "timestamp": "2026-11-28T05:58:33.690+00:00"
     }
    ],
    "aux": [
@@ -168,33 +168,33 @@
      "name": "rollout",
      "record": {
       "type": "session_meta",
-      "timestamp": "2026-11-26T04:36:24.937Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:21.833Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
-       "id": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
-       "cli_version": "0.162.1"
+       "id": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
+       "cli_version": "0.172.0"
       }
      },
-     "after": 2
+     "after": 1
     },
     {
      "name": "rollout",
      "record": {
       "type": "event_msg",
-      "timestamp": "2026-11-26T04:36:24.937Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:21.833Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
        "type": "task_started"
       }
      },
-     "after": 2
+     "after": 1
     },
     {
      "name": "rollout",
      "record": {
       "type": "turn_context",
-      "timestamp": "2026-11-26T04:36:24.968Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:21.878Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
        "model": "gpt-5.5"
       }
@@ -205,14 +205,15 @@
      "name": "rollout",
      "record": {
       "type": "response_item",
-      "timestamp": "2026-11-26T04:36:26.116Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:23.124Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
        "type": "function_call",
-       "id": "fc_0fd2172df911c9f3016b07b749e848819095b5d2c2131ce867",
+       "status": "completed",
+       "id": "fc_058c205e57ad0bde016b0a6d7ed868819581f74ac385dfc109",
        "name": "exec_command",
-       "arguments": "{\"cmd\":\"echo first\",\"workdir\":\"/app\"}",
-       "call_id": "call_VuZG0UbtyI07wl7HmMbAizV2"
+       "arguments": "{\"cmd\": \"echo first\", \"shell\": \"sh\"}",
+       "call_id": "call_XZcY85hsCq0eSVc4ABxhh7Vu"
       }
      },
      "after": 2
@@ -221,17 +222,17 @@
      "name": "rollout",
      "record": {
       "type": "token_usage_record",
-      "timestamp": "2026-11-26T04:36:26.117Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:23.125Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
-       "response_id": "resp_0fd2172df911c9f3016b07b74922408190803f54c7d5a4aad4",
+       "response_id": "resp_058c205e57ad0bde016b0a6d7e396c8195af79f2efbcb41b02",
        "usage": {
-        "input_tokens": 13346,
-        "cached_input_tokens": 3456,
+        "input_tokens": 13587,
+        "cached_input_tokens": 13184,
         "cache_write_input_tokens": 0,
-        "output_tokens": 25,
+        "output_tokens": 26,
         "reasoning_output_tokens": 0,
-        "total_tokens": 13371
+        "total_tokens": 13613
        }
       }
      },
@@ -241,13 +242,13 @@
      "name": "rollout",
      "record": {
       "type": "response_item",
-      "timestamp": "2026-11-26T04:36:26.162Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:23.146Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
        "type": "function_call_output",
-       "id": "fco_01a21623-f9b2-7952-ba8c-fdd762ea0e10",
-       "call_id": "call_VuZG0UbtyI07wl7HmMbAizV2",
-       "output": "Chunk ID: 817e94\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 2\nOutput:\nfirst\n"
+       "id": "fco_01a220bb-b8aa-7da2-9883-b6905e217c06",
+       "call_id": "call_XZcY85hsCq0eSVc4ABxhh7Vu",
+       "output": "Chunk ID: 3413a0\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 2\nOutput:\nfirst\n"
       }
      },
      "after": 4
@@ -256,12 +257,12 @@
      "name": "rollout",
      "record": {
       "type": "event_msg",
-      "timestamp": "2026-11-26T04:36:28.639Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:25.607Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
        "type": "task_complete",
        "error": {
-        "message": "unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:40081/4468d3291d9c9c5ed3fcb8a62232639e/openai/v1/responses",
+        "message": "unexpected status 503 Service Unavailable: service unavailable, url: http://127.0.0.1:43029/a8e4bbe16f0849d2abd4f61293c3509f/openai/v1/responses",
         "codex_error_info": {
          "http_connection_failed": {
           "http_status_code": 503
@@ -276,8 +277,8 @@
      "name": "rollout",
      "record": {
       "type": "event_msg",
-      "timestamp": "2026-11-26T04:36:34.027Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:30.964Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
        "type": "task_started"
       }
@@ -288,8 +289,8 @@
      "name": "rollout",
      "record": {
       "type": "turn_context",
-      "timestamp": "2026-11-26T04:36:34.031Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:30.969Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
        "model": "gpt-5.5"
       }
@@ -300,14 +301,15 @@
      "name": "rollout",
      "record": {
       "type": "response_item",
-      "timestamp": "2026-11-26T04:36:35.207Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:32.226Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
        "type": "function_call",
-       "id": "fc_0fd2172df911c9f3016b07b752fdfc819085eb5c756482ac34",
+       "status": "completed",
+       "id": "fc_058c205e57ad0bde016b0a6d87ed9c8195b7c506acff1e19f7",
        "name": "exec_command",
-       "arguments": "{\"cmd\":\"echo second\",\"workdir\":\"/app\"}",
-       "call_id": "call_oSYSsa8gYvACRk6WjyklSUig"
+       "arguments": "{\"cmd\":\"echo second\",\"shell\":\"sh\"}",
+       "call_id": "call_GjGxXWwJKCfxSwHS21NY3zyP"
       }
      },
      "after": 12
@@ -316,17 +318,17 @@
      "name": "rollout",
      "record": {
       "type": "token_usage_record",
-      "timestamp": "2026-11-26T04:36:35.209Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:32.228Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
-       "response_id": "resp_0fd2172df911c9f3016b07b7523e2881909311b71b17ec386c",
+       "response_id": "resp_058c205e57ad0bde016b0a6d8737708195b17c53597a43e044",
        "usage": {
-        "input_tokens": 13464,
+        "input_tokens": 13704,
         "cached_input_tokens": 13184,
         "cache_write_input_tokens": 0,
-        "output_tokens": 25,
+        "output_tokens": 23,
         "reasoning_output_tokens": 0,
-        "total_tokens": 13489
+        "total_tokens": 13727
        }
       }
      },
@@ -336,13 +338,13 @@
      "name": "rollout",
      "record": {
       "type": "response_item",
-      "timestamp": "2026-11-26T04:36:35.256Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:32.248Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
        "type": "function_call_output",
-       "id": "fco_01a21624-1d38-7891-974c-dff54293ccf3",
-       "call_id": "call_oSYSsa8gYvACRk6WjyklSUig",
-       "output": "Chunk ID: 51e4f8\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 2\nOutput:\nsecond\n"
+       "id": "fco_01a220bb-dc38-7a00-9fd9-9d9605cc312a",
+       "call_id": "call_GjGxXWwJKCfxSwHS21NY3zyP",
+       "output": "Chunk ID: 747777\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 2\nOutput:\nsecond\n"
       }
      },
      "after": 12
@@ -351,16 +353,19 @@
      "name": "rollout",
      "record": {
       "type": "response_item",
-      "timestamp": "2026-11-26T04:36:36.367Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:33.600Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
        "type": "message",
-       "id": "msg_0fd2172df911c9f3016b07b754232c8190a9af85a18a3741eb",
+       "status": "completed",
+       "id": "msg_058c205e57ad0bde016b0a6d89672c81959e4d80749e11045d",
        "role": "assistant",
        "content": [
         {
          "type": "output_text",
-         "text": "first second"
+         "text": "first second",
+         "annotations": [],
+         "logprobs": []
         }
        ],
        "phase": "final_answer"
@@ -372,17 +377,17 @@
      "name": "rollout",
      "record": {
       "type": "token_usage_record",
-      "timestamp": "2026-11-26T04:36:36.368Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:33.601Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
-       "response_id": "resp_0fd2172df911c9f3016b07b7536a7c819082effdea559d4720",
+       "response_id": "resp_058c205e57ad0bde016b0a6d88726481958bbd2d04177d8b28",
        "usage": {
-        "input_tokens": 13538,
-        "cached_input_tokens": 13184,
+        "input_tokens": 13773,
+        "cached_input_tokens": 13696,
         "cache_write_input_tokens": 0,
         "output_tokens": 6,
         "reasoning_output_tokens": 0,
-        "total_tokens": 13544
+        "total_tokens": 13779
        }
       }
      },
@@ -392,8 +397,8 @@
      "name": "rollout",
      "record": {
       "type": "event_msg",
-      "timestamp": "2026-11-26T04:36:36.373Z",
-      "thread": "01a21623-f3c6-7c00-a034-3a9ac15bd655",
+      "timestamp": "2026-11-28T05:58:33.605Z",
+      "thread": "01a220bb-b27b-7f63-a51f-27fd78ae18f3",
       "payload": {
        "type": "task_complete"
       }
@@ -403,19 +408,19 @@
    ],
    "usage": {
     "tool_call_count": 2,
-    "input_tokens": 40348,
-    "output_tokens": 56,
-    "total_tokens": 40404,
-    "cache_read_tokens": 29824,
+    "input_tokens": 41064,
+    "output_tokens": 55,
+    "total_tokens": 41119,
+    "cache_read_tokens": 40064,
     "cache_write_tokens": 0,
     "input_includes_cache": true,
     "models": [
      {
       "model": "gpt-5.5",
       "calls": 3,
-      "input_tokens": 40348,
-      "output_tokens": 56,
-      "cache_read_tokens": 29824,
+      "input_tokens": 41064,
+      "output_tokens": 55,
+      "cache_read_tokens": 40064,
       "cache_write_tokens": 0,
       "input_includes_cache": true
      }
