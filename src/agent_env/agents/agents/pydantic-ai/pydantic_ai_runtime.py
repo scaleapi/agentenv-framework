@@ -3,7 +3,9 @@ tools in the workspace, the task's MCP servers and its skills, continuing the co
 
 import asyncio
 from collections.abc import Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Final
 
 from agentenv_protocol.a2a_agent import Usage
@@ -21,6 +23,7 @@ from pydantic_ai_harness import Skills
 from pydantic_ai_harness.coder import Coder
 
 from pydantic_ai_agent import MESSAGES, Outcome, Turn, to_completion, turn_usage
+from pydantic_ai_atif import DELEGATE_TOOL, DELEGATED, FAILED
 
 # Consecutive retries a tool gets for arguments it refuses, as many as Coder gives its file tools, so a model that
 # fumbles a command twice doesn't end the task.
@@ -30,6 +33,9 @@ _NO_KEY: Final[str] = "unset"
 # The Pydantic AI providers a model name's prefix picks for the endpoint, as in ``vllm:qwen3.8-27b``: each speaks
 # OpenAI Chat Completions, and ``vllm`` fits its requests to the model's family, as a vLLM server needs.
 _PROVIDERS: Final = {"openai": OpenAIProvider, "vllm": VLLMProvider}
+# The delegate_task call the running delegated run works for: the run that made the call (None for the turn's own) and
+# the call's id; None in the turn's own run. Set while the call runs, so the run it starts, inside it, reads it.
+_DELEGATION: Final[ContextVar[tuple[str | None, str] | None]] = ContextVar("pydantic_ai_a2a_delegation", default=None)
 
 
 def _model(turn: Turn) -> OpenAIChatModel:
@@ -49,20 +55,36 @@ def _settings(turn: Turn) -> ModelSettings:
     return settings
 
 
+async def _delegating(ctx: Any, /, *, call: Any, tool_def: Any, args: Any, handler: Any) -> Any:
+    """Runs a delegate_task call under its ``_DELEGATION``, so the run it starts feeds its messages as that call's."""
+    if call.tool_name != DELEGATE_TOOL:
+        return await handler(args)
+    token = _DELEGATION.set((None if _DELEGATION.get() is None else ctx.run_id, call.tool_call_id))
+    try:
+        return await handler(args)
+    finally:
+        _DELEGATION.reset(token)
+
+
 def _agent(turn: Turn, responses: list[ModelResponse]) -> Agent:
     """The turn's agent, which puts every model response it gets in ``responses``: its own, and those of the runs it
     delegates to with delegate_task, which run this agent again with messages of their own, so they're never in the
-    turn's messages. Listed last, the recorder is the first to see each response."""
+    turn's messages, and which it feeds the atif/1 copy when the task builds one. Listed last, the recorder is the first
+    to see each response."""
 
-    async def keep(_ctx: Any, /, *, request_context: Any, response: ModelResponse) -> ModelResponse:
+    async def keep(ctx: Any, /, *, request_context: Any, response: ModelResponse) -> ModelResponse:
         responses.append(response)
+        if turn.on_aux is not None and (delegation := _DELEGATION.get()) is not None:
+            parent, call = delegation
+            for message in _events([request_context.messages[-1], response]):
+                turn.on_aux(DELEGATED, {"run": ctx.run_id, "parent": parent, "spawned_by": call, "message": message})
         return response
 
     # The agent runs in a sandbox of its own, so its file tools reach the files attached outside the workspace.
     capabilities: list[Any] = [LocalWorkspace(turn.workspace), Coder(unrestricted_filesystem=True)]
     if turn.skill_names:
         capabilities.append(Skills(turn.skills_dir, include=turn.skill_names))
-    capabilities.append(Hooks(after_model_request=keep))
+    capabilities.append(Hooks(after_model_request=keep, tool_execute=_delegating if turn.on_aux else None))
     toolsets = [
         MCPToolset(registration["url"], id=name, headers=dict(registration.get("headers") or {}))
         for name, registration in turn.mcp_servers.items()
@@ -150,6 +172,7 @@ class PydanticAIRuntime:
         recorded = len(history)
         messages: list[ModelMessage] = list(history)
         usage = RunUsage()
+        run: Any = None
         try:
             async with agent.iter(prompt, message_history=history,
                                   usage_limits=UsageLimits(request_limit=turn.config.request_limit)) as run:
@@ -164,7 +187,13 @@ class PydanticAIRuntime:
             turn.on_usage(_usage(responses, usage))
             raise
         except Exception as exc:  # every failure is the task's, typed by whose it was
-            return _failure(exc, _usage(responses, usage))
+            failure = _failure(exc, _usage(responses, usage))
+            if turn.on_aux is not None:
+                # What the run added after its last node, as the request it sent and got no answer to.
+                unsent = _events(run.all_messages()[recorded:]) if run is not None else []
+                turn.on_aux(FAILED, {"messages": unsent, "at": datetime.now(timezone.utc).isoformat(), "error": {
+                    "kind": failure.error_type, "code": failure.error_code, "message": failure.text}})
+            return failure
         messages = result.all_messages()
         for event in _events(messages[recorded:]):
             turn.on_event(event)
