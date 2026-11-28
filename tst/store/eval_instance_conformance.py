@@ -10,6 +10,7 @@ import uuid
 
 import pytest
 
+from agent_env.config import get_config
 from agent_env.eval import instance_store
 from agent_env.eval.instance import (
     Attempt,
@@ -91,10 +92,52 @@ def each_eval_instance_keeps_its_own_slots(root):
     assert {s.eval_instance_id for s in instance_store.get_slots(second.id)} == {second.id}
 
 
-def an_eval_instance_id_is_recorded_once(root):
+def a_creation_stopped_partway_is_not_seen_and_running_it_again_finishes_it(root):
+    """The slots are written before the instance, so slots left without one are read by nobody."""
+    instance = _instance(root)
+    slots = planned_slots(instance.id, [(f"{root}/tasks/a", 2), (f"{root}/tasks/b", 2)], k=2)
+    instance_store.ensure_indexes()
+    for slot in slots[:3]:
+        get_config().get_document_store().insert(instance_store.EVAL_SLOTS_COLLECTION, slot.to_dict())
+
+    assert instance_store.get_eval_instance(instance.id) is None
+    assert instance.id not in [i.id for i in instance_store.list_eval_instances(eval_id=root)]
+    with pytest.raises(LookupError):
+        instance_store.get_slots(instance.id)
+    with pytest.raises(LookupError):
+        instance_store.get_slot(instance.id, slots[0].id)
+    with pytest.raises(LookupError):
+        instance_store.append_attempt(instance.id, slots[0].id, _attempt("early"))
+
+    instance_store.create_eval_instance(instance, slots)
+    instance_store.create_eval_instance(instance, slots)
+    assert instance_store.get_eval_instance(instance.id) == instance
+    assert instance_store.get_slots(instance.id) == slots
+
+
+def a_different_record_under_a_recorded_id_is_refused(root):
     instance = created_instance(root)
+    slot = f"{root}/tasks/a@2#1"
     with pytest.raises(DuplicateKeyError):
-        instance_store.create_eval_instance(instance, [])
+        instance_store.create_eval_instance(_instance(root, id=instance.id, settings=EvalSettings(k=9)), [])
+    instance_store.append_attempt(instance.id, slot, _attempt("first"))
+    with pytest.raises(DuplicateKeyError):
+        instance_store.create_eval_instance(instance, planned_slots(instance.id, [(f"{root}/tasks/a", 2)], k=1))
+    assert len(instance_store.get_slot(instance.id, slot).attempts) == 1
+
+
+def per_run_secrets_are_not_stored(root):
+    """As the run index strips them from a run's overrides; a bare env: or secret: reference names one and is kept."""
+    overrides = {"litellm_api_key": "sk-not-stored", "judge_litellm_api_key": "env:JUDGE_KEY", "judge_model": "m"}
+    instance = _instance(root, settings=EvalSettings(k=1, overrides=overrides))
+    instance_store.create_eval_instance(instance, planned_slots(instance.id, [(f"{root}/tasks/a", 2)], k=1))
+    instance_store.create_eval_instance(instance, planned_slots(instance.id, [(f"{root}/tasks/a", 2)], k=1))
+    graded = instance_store.record_slot(instance.id, f"{root}/tasks/a@2#1", SlotState.GRADED,
+                                        {"result": "passed", "overrides": {"usersim_api_key": "sk-not-stored"}})
+
+    stored = instance_store.get_eval_instance(instance.id).settings.overrides
+    assert stored == {"judge_litellm_api_key": "env:JUDGE_KEY", "judge_model": "m"}
+    assert graded.result == {"result": "passed", "overrides": {}}
 
 
 def eval_instances_list_newest_first_and_by_eval(root):
@@ -130,7 +173,9 @@ CASES = [
     an_attempt_is_added_after_the_earlier_ones_and_never_replaces_them,
     a_slot_write_counts_in_slots_rev_before_it_lands,
     each_eval_instance_keeps_its_own_slots,
-    an_eval_instance_id_is_recorded_once,
+    a_creation_stopped_partway_is_not_seen_and_running_it_again_finishes_it,
+    a_different_record_under_a_recorded_id_is_refused,
+    per_run_secrets_are_not_stored,
     eval_instances_list_newest_first_and_by_eval,
     an_unknown_status_or_slot_state_is_refused,
 ]
