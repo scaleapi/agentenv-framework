@@ -206,19 +206,21 @@ class CallFeed:
     """What a run feeds the task's atif/1 copy beside the SDK's events, when it builds one (``on_aux``): before each
     event, the model calls the turn's LLMs got a response to since the last, read off their metrics and counted as
     ``turn_usage`` counts them, so each call's step opens before its response's events and the steps sum to the
-    turn's usage; each failed attempt the SDK makes again; the tools the model is offered; and the zone of the
-    events' naive times. One lock keeps records and events in order, as the SDK calls back from several threads."""
+    turn's usage; each failed attempt the SDK makes again, on the call whose response it refused when it recorded
+    one; the tools the model is offered; and the zone of the events' naive times. One lock keeps records and events
+    in order, as the SDK calls back from several threads."""
 
     def __init__(self, on_event: Callable[[dict[str, Any]], None],
-                 on_aux: Callable[[str, dict[str, Any]], None] | None, *, model: str, effort: str | None,
+                 on_aux: Callable[[str, dict[str, Any]], None] | None, *, model: str,
                  now: Callable[[], datetime] = _utc_now) -> None:
         self._on_event, self._on_aux = on_event, on_aux
-        self._model, self._effort, self._now = model, effort, now
+        self._model, self._now = model, now
         self._lock = threading.Lock()
         # Each metrics object's latencies, costs and token usages read so far, by id: the condenser's LLM may share
         # the agent's.
         self._read: dict[int, list[int]] = {}
-        #: The turn's LLMs, each with ``metrics`` and ``uses_responses_api()``, once the run has built them.
+        #: The turn's LLMs, each with ``metrics``, ``reasoning_effort`` and ``uses_responses_api()``, once the run has
+        #: built them. Their effort is the one the SDK calls with: the task's, else the SDK's default.
         self.llms: Sequence[Any] = ()
 
     @property
@@ -236,12 +238,18 @@ class CallFeed:
             self._answered()
 
     def retried(self, attempt: int, retries: int, error: BaseException | None) -> None:
-        """The SDK's retry listener: attempt ``attempt`` of at most ``retries`` failed and is made again."""
-        record = {"type": "llm_call", "outcome": "failed", "model": self._model, "timestamp": self._stamp(),
-                  "attempt": attempt}
+        """The SDK's retry listener: attempt ``attempt`` of at most ``retries`` failed and is made again. A response
+        the SDK recorded and then refused, as one with no choices (``LLMNoResponseError``), is the attempt's own, so
+        its record holds the failure; an attempt with none is a failed call of its own."""
+        if self._on_aux is None:
+            return
+        failure: dict[str, Any] = {"attempt": attempt}
         if error is not None:
-            record.update(error_type=type(error).__name__, error=str(error) or type(error).__name__)
-        self._aux("llm_call", record)
+            failure.update(error_type=type(error).__name__, error=str(error) or type(error).__name__)
+        with self._lock:
+            if not self._answered(failure):
+                self._on_aux("llm_call", {"type": "llm_call", "outcome": "failed", "model": self._model,
+                                          "timestamp": self._stamp(), **failure})
 
     def tools(self, definitions: Sequence[Mapping[str, Any]]) -> None:
         self._aux("tools", {"type": "tools", "tools": list(definitions)})
@@ -259,12 +267,14 @@ class CallFeed:
     def _stamp(self) -> str:
         return self._now().astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
-    def _answered(self) -> None:
+    def _answered(self, failure: Mapping[str, Any] | None = None) -> int:
         """One ``llm_call`` record per response latency not yet read: the SDK records one for every response, then
         its cost when it has one, then its usage under the response's id when it came with any. A cost is the call's
-        only when every new response has one, since costs name no response."""
+        only when every new response has one, since costs name no response. ``failure`` goes on the last: read as an
+        attempt fails, no event has followed it. The number of records."""
         if self._on_aux is None:
-            return
+            return 0
+        records: list[dict[str, Any]] = []
         for llm in self.llms:
             metrics = llm.metrics
             read = self._read.setdefault(id(metrics), [0, 0, 0])
@@ -287,9 +297,14 @@ class CallFeed:
                                               "cache_write_tokens"), counted)))
                 if len(priced) == len(answered):
                     record["cost_usd"] = priced[index].cost
-                if self._effort is not None:
-                    record["reasoning_effort"] = self._effort
-                self._on_aux("llm_call", record)
+                if llm.reasoning_effort is not None:
+                    record["reasoning_effort"] = llm.reasoning_effort
+                records.append(record)
+        if failure and records:
+            records[-1].update(failure)
+        for record in records:
+            self._on_aux("llm_call", record)
+        return len(records)
 
 
 @dataclass(slots=True)

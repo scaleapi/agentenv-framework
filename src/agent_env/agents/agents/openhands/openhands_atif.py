@@ -3,7 +3,9 @@ usage, model or zoned time, so the runtime reads each model call off the turn's 
 ``llm_call`` record just before its response's first event. A step is one model call: its record opens it, and the
 events naming its response id fill it (the response's actions, each answered by its observation there, its message,
 or the condenser's summary). A call the SDK failed and made again, the endpoint refusing the conversation and the run's
-own failure are steps with no model call holding the error; the harness's own messages to the model are system steps.
+own failure are steps with no model call holding the error, as is a reply the SDK gives as the agent itself; a response
+the SDK refused and made again, as one with no choices, is its call's step holding the error. The harness's own
+messages to the model are system steps.
 The tools the model is offered come as a ``tools`` record, the clock the events' naive times are on as ``clock``, and
 the turn's cost as ``turn``."""
 from __future__ import annotations
@@ -24,8 +26,9 @@ _COUNTS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_to
 _DATA_URL = re.compile(r"data:(?P<type>[\w.+-]+/[\w.+-]+);base64,(?P<data>.*)", re.S)
 _RESULTS = ("ObservationEvent", "AgentErrorEvent", "UserRejectObservation")
 #: Events with nothing for the copy: the system prompt, whose tools lack their parameters there and come as a
-#: ``tools`` record instead, and an interrupt, whose calls left open are answered as the task ends.
-_SILENT = ("SystemPromptEvent", "InterruptEvent")
+#: ``tools`` record instead, and an interrupt, whose calls left open are answered as the task ends, or the pause it
+#: falls back to when the run hasn't started.
+_SILENT = ("SystemPromptEvent", "InterruptEvent", "PauseEvent")
 _FINISH = "finish"
 _REFUSED = "the endpoint refused the conversation, so it is condensed before the call is made again"
 
@@ -67,8 +70,7 @@ class OpenHandsAtif(Adapter):
         if record.get("outcome") == "failed":
             key = f"failed:{self._seq}"
             turn.step(key=key, llm_call_count=0, model_name=model, time=when)
-            turn.error(message=_string(record.get("error")) or "the model call failed", kind="infra_error",
-                       code=_string(record.get("error_type")), step=key)
+            _attempt_failed(record, key, turn)
             return
         key = f"call:{self._seq}"
         if (response := _string(record.get("response_id"))) is not None:
@@ -77,6 +79,8 @@ class OpenHandsAtif(Adapter):
         turn.step(key=key, model_name=model, reasoning_effort=_string(record.get("reasoning_effort")), time=when,
                   cost_usd=cost, cost_source="harness" if cost is not None else None,
                   **{name: record[name] for name in _COUNTS if is_token_count(record.get(name))})
+        if "attempt" in record:
+            _attempt_failed(record, key, turn)
 
     @aux("tools", type="tools")
     def tools(self, record: dict[str, Any], turn: Any) -> None:
@@ -93,12 +97,15 @@ class OpenHandsAtif(Adapter):
 
     @native(where={"kind": "MessageEvent", "source": "agent"})
     def said(self, record: dict[str, Any], turn: Any) -> None:
-        """A response with no call, or the SDK's own word as the agent when no response id names a model call."""
+        """A response with no call, or, when no response id names a model call, the SDK's own reply as the agent (a
+        model that can't see the prompt's images), a step with no model call that the task's reply then matches."""
         message, when = record.get("llm_message") or {}, self._time(record)
         text = _text(message.get("content"))
         if _string(record.get("llm_response_id")) is None:
             if text:
-                turn.system_message(text=text, time=when)
+                key = f"sdk:{record.get('id')}"
+                turn.step(key=key, llm_call_count=0, time=when)
+                turn.message(step=key, text=text, time=when)
             return
         key = self._key(record)
         self._reason(message, key, when, turn)
@@ -273,6 +280,11 @@ class OpenHandsAtif(Adapter):
                             "observation": {"kind": "MCPToolObservation", "is_error": status == "error",
                                             "content": [{"type": "text", "text": _result_text(result.get("content"))}]}})
         return Native(log=log)
+
+
+def _attempt_failed(record: dict[str, Any], key: str, turn: Any) -> None:
+    turn.error(message=_string(record.get("error")) or "the model call failed", kind="infra_error",
+               code=_string(record.get("error_type")), step=key)
 
 
 def _arguments(call: Any) -> Any:

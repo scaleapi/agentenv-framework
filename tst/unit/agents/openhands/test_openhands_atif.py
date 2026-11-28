@@ -36,6 +36,8 @@ TERMINAL = {"type": "function", "function": {
 FINISH = {"type": "function", "function": {
     "name": "finish", "description": "Signals the completion of the current task or conversation.",
     "parameters": {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]}}}
+#: The effort the SDK's LLM calls with when the task's config sets none (``LLM.reasoning_effort``'s default).
+SDK_EFFORT = "high"
 _TICKS = itertools.count(1)
 
 
@@ -166,8 +168,9 @@ class Run:
         self.responses_api = responses_api
         self.feed = CallFeed(lambda record: self.records.append(Fed(json.loads(json.dumps(record)))),
                              lambda name, record: self.records.append(Fed(json.loads(json.dumps(record)), aux=name)),
-                             model=MODEL, effort=effort, now=Clock())
-        self.feed.llms = [SimpleNamespace(metrics=self.metrics, uses_responses_api=lambda: responses_api)]
+                             model=MODEL, now=Clock())
+        self.feed.llms = [SimpleNamespace(metrics=self.metrics, reasoning_effort=effort,
+                                          uses_responses_api=lambda: responses_api)]
         self.records.append(Fed({"type": "clock", "utc_offset_s": offset_s}, aux="clock"))
         self.actions = 0
         if tools:
@@ -380,6 +383,28 @@ def test_a_call_the_sdk_made_again_is_a_step_with_its_error_before_the_call_that
     assert_sums_to(document, run)
 
 
+class LLMNoResponseError(Exception):
+    """The SDK's error for a response with no choices, raised inside its retry boundary after telemetry records it."""
+
+
+def test_a_response_the_sdk_refused_and_made_again_is_its_calls_step_holding_the_error():
+    """Gemini's empty choices: the response is in the metrics, tokens and cost and all, before the SDK raises and its
+    retry listener hears of that attempt, so the attempt is one step, with the call's usage, time and error."""
+    error = "Response choices is less than 1. Response: ModelResponse(id='r1', choices=[])"
+    run = Run().event(user("go")).respond("r1", 900, 0, cost=0.0009).retried(1, LLMNoResponseError(error))
+    run.respond("r2").event(reply("r2", "ok"))
+    document = kit((run, "ok")).document
+    refused, answered = agent_steps(document)
+    (fed,) = [fed.record for fed in run.records if fed.aux == "llm_call" and fed.record.get("attempt")]
+
+    assert [step["llm_call_count"] for step in (refused, answered)] == [1, 1]
+    assert refused["metrics"]["prompt_tokens"] == 900 and refused["metrics"]["cost_usd"] == 0.0009
+    assert profile_of(refused)["error"] == {"kind": "infra_error", "message": error, "code": "LLMNoResponseError"}
+    assert fed["response_id"] == "r1" and refused["timestamp"] == fed["timestamp"] < answered["timestamp"]
+    assert "error" not in profile_of(answered) and answered["message"] == "ok"
+    assert_sums_to(document, run)
+
+
 @pytest.mark.parametrize(("code", "kind", "error_kind"), [
     ("LLMAuthenticationError", "auth", "infra_error"), ("MaxIterationsReached", "agent_action", "agent_error")])
 def test_the_runs_failure_is_a_step_with_no_model_call_holding_it(code, kind, error_kind):
@@ -450,6 +475,28 @@ def test_the_harness_messages_to_the_model_are_system_steps_and_the_prompt_is_th
         ("system", "Your last response did not include a function call or a message."), ("agent", "done")]
 
 
+def test_a_reply_the_sdk_gives_as_the_agent_is_said_once_on_a_step_with_no_model_call():
+    """A model that can't see the prompt's images is never called: the SDK replies as the agent, and that's the
+    task's reply."""
+    said = "The model anthropic/claude-haiku-4-5 can't read images."
+    run = Run().event(user("look")).event(message("agent", [text(said)], role="assistant"))
+    document = kit((run, said)).document
+
+    assert [(step["source"], step["message"], step.get("llm_call_count")) for step in document["steps"]] == [
+        ("user", "do it", None), ("agent", said, 0)]
+
+
+def test_a_step_names_the_effort_its_llm_called_with_the_sdks_default_when_the_task_sets_none():
+    """The SDK's LLM calls at its own ``reasoning_effort``, which is ``high`` unless agent-config's ``effort`` sets
+    another, so a task that sets none still made its calls at one."""
+    default, unset = Run(effort=SDK_EFFORT), Run(effort=None)
+    for run in (default, unset):
+        run.event(user("go")).respond("r1").event(reply("r1", "ok"))
+
+    assert [agent_steps(kit((run, "ok")).document)[0].get("reasoning_effort") for run in (default, unset)] == [
+        "high", None]
+
+
 def test_a_finish_call_says_the_reply_once():
     plain = Run().event(user("go")).respond("r1").event(finish("r1", "call_f", "5050")).event(finished("call_f", "5050"))
     said = Run().event(user("go")).respond("r1").event(finish("r1", "call_f", "5050", thought="All done."))
@@ -469,6 +516,17 @@ def test_an_interrupted_tasks_open_calls_are_answered_canceled():
 
     assert answer == {"source_call_id": "call_1", "content": "", "extra": {"agentenv": {"status": "canceled"}}}
     assert "unmatched" not in profile_of(result.document)
+
+
+def test_a_stop_as_the_run_starts_pauses_it_and_the_pause_is_no_unmatched_record():
+    """``interrupt()`` that finds no run task yet falls back to ``pause()``, which keeps the run from starting."""
+    run = Run().event(user("go")).event(event("PauseEvent", "user"))
+    result = check_adapter(OpenHandsAtif, [RecordedTask(context=context(), records=run.ended(), final=[
+        "OpenHands did not finish within 1s"], state="failed")])
+
+    assert not result.findings
+    assert [(step["source"], step.get("llm_call_count")) for step in result.document["steps"]] == [
+        ("user", None), ("agent", 0)]
 
 
 def test_a_result_for_a_call_this_copy_never_saw_stays_in_the_native_log():
@@ -528,10 +586,10 @@ def test_from_atif_gives_the_sdks_events_back():
 def test_the_feed_reads_a_shared_metrics_object_once_and_nothing_without_a_copy():
     shared = SimpleNamespace(response_latencies=[SimpleNamespace(model="m", latency=1.0, response_id="r1")],
                              costs=[], token_usages=[])
-    llms = [SimpleNamespace(metrics=shared, uses_responses_api=lambda: False)] * 2
+    llms = [SimpleNamespace(metrics=shared, reasoning_effort=None, uses_responses_api=lambda: False)] * 2
     events, records = [], []
-    copying = CallFeed(events.append, lambda name, record: records.append((name, record)), model=MODEL, effort=None)
-    native = CallFeed(events.append, None, model=MODEL, effort=None)
+    copying = CallFeed(events.append, lambda name, record: records.append((name, record)), model=MODEL)
+    native = CallFeed(events.append, None, model=MODEL)
     copying.llms = native.llms = llms
     copying.event({"kind": "MessageEvent"})
     copying.end()
@@ -546,7 +604,7 @@ def test_the_feed_reads_a_shared_metrics_object_once_and_nothing_without_a_copy(
 
 def test_the_clock_record_is_the_local_offset_the_sdk_stamps_events_in():
     records = []
-    CallFeed(lambda _: None, lambda name, record: records.append(record), model=MODEL, effort=None).clock()
+    CallFeed(lambda _: None, lambda name, record: records.append(record), model=MODEL).clock()
     offset = datetime.now().astimezone().utcoffset()
 
     assert records == [{"type": "clock", "utc_offset_s": int(offset.total_seconds())}]
@@ -603,8 +661,9 @@ class FeedingRuntime:
     async def run(self, turn: Any) -> Any:
         self.turns.append(turn)
         metrics = SimpleNamespace(response_latencies=[], costs=[], token_usages=[])
-        feed = CallFeed(turn.on_event, turn.on_aux, model=turn.config.model, effort=turn.config.effort)
-        feed.llms = [SimpleNamespace(metrics=metrics, uses_responses_api=lambda: False)]
+        feed = CallFeed(turn.on_event, turn.on_aux, model=turn.config.model)
+        feed.llms = [SimpleNamespace(metrics=metrics, reasoning_effort=turn.config.effort or SDK_EFFORT,
+                                     uses_responses_api=lambda: False)]
         feed.clock()
         feed.event(user(turn.text))
         if feed.builds:

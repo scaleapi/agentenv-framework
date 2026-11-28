@@ -139,7 +139,7 @@ class SdkRuntime:
         actions = 0
         # The SDK reports why a run failed only as events, whether or not it raises.
         errors: list[ConversationErrorEvent] = []
-        feed = CallFeed(turn.on_event, turn.on_aux, model=turn.config.model, effort=turn.config.effort)
+        feed = CallFeed(turn.on_event, turn.on_aux, model=turn.config.model)
 
         def on_event(event: Event) -> None:
             nonlocal actions
