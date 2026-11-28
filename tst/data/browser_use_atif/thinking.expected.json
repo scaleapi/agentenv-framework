@@ -1,0 +1,148 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-browser-use-thinking",
+ "agent": {
+  "name": "browser-use",
+  "version": "2.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:55:00.704918Z",
+   "source": "user",
+   "message": "Open https://example.com, think about what the page is for, and reply with one sentence saying so.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-browser-use-thinking",
+     "task_id": "3e017c77-d149-4691-aab1-edaabc3e9005",
+     "message_id": "8a09499023674a4e9b2a86d24c876516",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:55:03.657755Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5-20251001",
+   "reasoning_effort": "high",
+   "message": "",
+   "reasoning_content": "The user wants me to:\n1. Open https://example.com\n2. Look at the page and think about what it's for\n3. Reply with one sentence describing its purpose\n\nLet me start by opening the page and taking a screenshot to see what it shows.",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01TSPe949aAwn8iMheVCdsGP",
+     "function_name": "python",
+     "arguments": {
+      "code": "\n# Open the page and take a screenshot\nnew_tab(\"https://example.com\")\nwait_for_load()\nscreenshot()\n"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01TSPe949aAwn8iMheVCdsGP",
+      "content": [
+       {
+        "type": "text",
+        "text": "/home/agent/.browser-use-a2a/workspaces/33849e056ea5495c32ddb26c9f7450ae/.browser-use/screenshots/0000.jpg\n"
+       },
+       {
+        "type": "image",
+        "source": {
+         "media_type": "image/jpeg",
+         "path": "media/81977505ce04546845544ff60c8a8a535c41453d76415ab37bef9bb78f7c0085.jpg"
+        }
+       }
+      ],
+      "extra": {
+       "agentenv": {
+        "media": {
+         "media/81977505ce04546845544ff60c8a8a535c41453d76415ab37bef9bb78f7c0085.jpg": {
+          "sha256": "81977505ce04546845544ff60c8a8a535c41453d76415ab37bef9bb78f7c0085",
+          "bytes": 39762,
+          "width": 800,
+          "height": 600
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 2720,
+    "cached_tokens": 0,
+    "completion_tokens": 146,
+    "cost_usd": 0.00345,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0,
+      "cost_source": "harness"
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "reasoning": [
+      {
+       "chars": 229,
+       "visibility": "summary",
+       "signature": "Es0DCoQBCBQQAhgCKkAQCT+BdQrYH8xeCIfy51NqJEJjXBixBMJufySWwKnkntZkCXehr+geBqm0b5XI7w6JMQ/RdoWN8AIJ+96sx9QVMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOABCCHRoaW5raW5nWgw0Nzg0NTY3OTEwNjWoAcj1qdgGEgwlknA2evZ3PthEax4aDMpcjwhMD9Ik6V8LxCIwu32AhWPnruicSDFpK8gI2wSFF2PLhnzzmdQarYMBNRWBcQwwnWtLBkZ9hphhZLkzKvUBN55xYu4hZq/eZfBl+kl1ewSo+Y+L5dE+ZJRjhyvXQmMVGlxV3wPa9ui3uGxFctCCgzuiucvfdOLz4jz57uRaVk1GXd+peUFGS6Y15QKp4dooEPMpsgos99XZy/veykxdAIXClP+Pirmet9xJEUIYthq38TdQvTMry6xKgGaPP8FhCLbxFuA3M4T+/H4xuUbZi7iUsFsxb8KpBJw5A8h4NKM1yU3svhjLYSZXSB8DN5fvZuyj0dNvZFo5kfgaf7NNzu9XVT7QqY6gTSpn2SoB1KfzyQymIouaMeLnGg/b+OTtA3naR7nNtLFJlqVJI15WxG7q0EkYAQ=="
+      }
+     ]
+    }
+   }
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:55:05.844120Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5-20251001",
+   "reasoning_effort": "high",
+   "message": "Example.com is a reserved domain used for demonstrating and documenting concepts in various documentation examples without requiring permission or serving as an actual service.",
+   "metrics": {
+    "prompt_tokens": 3583,
+    "cached_tokens": 0,
+    "completion_tokens": 32,
+    "cost_usd": 0.003743,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0,
+      "cost_source": "harness"
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 6303,
+  "total_completion_tokens": 178,
+  "total_cached_tokens": 0,
+  "total_cost_usd": 0.007193,
+  "total_steps": 3,
+  "extra": {
+   "agentenv": {
+    "cost_source": "harness",
+    "total_cache_write_tokens": 0
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "browser-use-messages/1",
+   "adapter": {
+    "name": "browser-use-messages-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

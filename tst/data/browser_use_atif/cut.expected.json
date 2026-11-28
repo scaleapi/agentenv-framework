@@ -1,0 +1,82 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-browser-use-cut",
+ "agent": {
+  "name": "browser-use",
+  "version": "2.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:55:40.886059Z",
+   "source": "user",
+   "message": "Reply with ok.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-browser-use-cut",
+     "task_id": "d1d9f812-35a5-485f-8b46-f089ae236020",
+     "message_id": "31e195ff5170482f9f679ec8f793d4d3",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:55:43.655029Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5-20251001",
+   "reasoning_effort": "medium",
+   "message": "ok.",
+   "reasoning_content": "The user is asking me to reply with \"ok\". This is a simple request that doesn't require any tool calls or actions. I should just respond with \"ok\".",
+   "metrics": {
+    "prompt_tokens": 2699,
+    "cached_tokens": 0,
+    "completion_tokens": 47,
+    "cost_usd": 0.002934,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0,
+      "cost_source": "harness"
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed",
+     "reasoning": [
+      {
+       "chars": 147,
+       "visibility": "summary",
+       "signature": "EvsCCoQBCBQQAhgCKkBYvt1M7gHEyEdhaKZ1PpAyQ5VEYk/KZx6YsgTv6khFw4lNOPpw95M6wR7VV567RqUS4Re6h+x8J14m1jqPMTzZMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOABCCHRoaW5raW5nWgw0Nzg0NTY3OTEwNjWoAe/1qdgGEgyK6W9XQGk+Gkq5tQ0aDIPKkvoKTVqRAR/KXyIw/dgkQtLMwvXgmsIgAde8IA6pf9P3tC4DZT20/9RYeQW4mFCZhCK9VTo7Cc1+ekzyKqMBk/ihH5MfTWVUpaE7mGSNdiYQERlPj14Umbwpoq+/ZBVu0to6hedpqfHzYLI0te0313P7tnZz/dDUPOjgWoGl2DwFg9CJTWtlJYXKvAH7jMvht5O3RLSKrhmqRWAUKWN1YdzZ5RUVSGeG71BAuNKMyI+eXdfd+cKBddg92nuauJaX1CC/tD1cDSp7lpaE6Kzwkc2nvrP/KGce7DZGuZGrRhYoqxgB"
+      }
+     ]
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 2699,
+  "total_completion_tokens": 47,
+  "total_cached_tokens": 0,
+  "total_cost_usd": 0.002934,
+  "total_steps": 2,
+  "extra": {
+   "agentenv": {
+    "cost_source": "harness",
+    "total_cache_write_tokens": 0
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "browser-use-messages/1",
+   "adapter": {
+    "name": "browser-use-messages-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

@@ -1,7 +1,8 @@
 """browser-use's ATIF adapter: the Pydantic AI messages the server appends when a turn's run ends
 (browser-use-messages/1), as ATIF. The run returns the whole conversation, so a task keeps the messages its own run
 stamped, whose ``run_id`` the ``turn`` aux record names. A step is one model response: its thinking, text and calls, the
-results the requests after it hold, its time and its own usage and cost.
+results the requests after it hold, its time, its own usage and cost, and the effort the conversation's settings put it
+at, which browser-use names once, in the conversation's first request, even when the turn configured none.
 
 agent.py keeps what the messages don't, and the server feeds it as aux records before the messages: ``attempt``, each
 HTTP request to the model and how it was answered, so a refused call is a step with no model call holding its error and
@@ -73,6 +74,8 @@ class BrowserUseAtif(Adapter):
         self._answer: str | None = None
         self._model: str | None = None
         self._effort: str | None = None
+        #: The thinking effort in effect, as the conversation's last settings change named it.
+        self._effort_set: str | None = None
         self._attempts: list[dict[str, Any]] = []
         self._summaries: list[tuple[datetime, dict[str, Any]]] = []
         self._images: dict[str, dict[int, dict[str, Any]]] = {}
@@ -108,9 +111,17 @@ class BrowserUseAtif(Adapter):
 
     @native(where={"kind": "request"})
     def request(self, record: dict[str, Any], turn: Any) -> None:
-        if not self._ours(record):
+        ours, parts = self._ours(record), record["parts"]
+        if ours and _string(record.get("timestamp")):
+            # Pydantic AI stamps a request as it prepares it, so a call sent before then got its response already,
+            # or never will: one the per-request deadline cut off goes before the retry feedback it led to.
+            self._until(_instant(record["timestamp"]), turn, answered=False)
+        for part in parts:
+            settings = part.get("settings")
+            if part.get("part_kind") == "model-settings-delta" and _is_mapping(settings) and "thinking" in settings:
+                self._effort_set = _string(settings["thinking"])
+        if not ours:
             return
-        parts = record["parts"]
         for part in parts:
             if part.get("part_kind") == "tool-return":
                 self._result(part, turn)
@@ -128,9 +139,9 @@ class BrowserUseAtif(Adapter):
             return
         when = record.get("timestamp")
         self._until(_instant(when), turn)
-        key = self._key(record, "response")
-        turn.step(key=key, model_name=_string(record.get("model_name")), reasoning_effort=self._effort, time=when,
-                  **_usage(record.get("usage")))
+        key = self._key("response")
+        turn.step(key=key, model_name=_string(record.get("model_name")), reasoning_effort=self._effort_in_effect(),
+                  time=when, **_usage(record.get("usage")))
         said = self._content(record, key, when, turn, text=True)
         for part in record["parts"]:
             if part.get("part_kind") == "tool-call":
@@ -157,13 +168,20 @@ class BrowserUseAtif(Adapter):
 
     # Writing
 
+    def _effort_in_effect(self) -> str | None:
+        """Claude's thinking effort as the conversation's settings name it; else the configured one, which an
+        OpenAI-compatible route sends as a setting of its own that the messages never record."""
+        return self._effort_set or self._effort
+
     def _ours(self, message: dict[str, Any]) -> bool:
         """Whether the message is this task's: one its run stamped, not an earlier turn's the run returned again."""
         return self._run is not None and message.get("run_id") == self._run
 
-    def _key(self, response: dict[str, Any], kind: str) -> str:
+    def _key(self, kind: str) -> str:
+        """A step key of the context's own, not the provider's response id, which can repeat: Ollama's OpenAI route
+        numbers its ids below 1000, and two responses under one key would be one step."""
         self._seq += 1
-        return _string(response.get("provider_response_id")) or f"{kind}-{self._seq}"
+        return f"{kind}-{self._seq}"
 
     def _content(self, response: dict[str, Any], key: str, when: Any, turn: Any, *, text: bool) -> bool:
         """A response's thinking as reasoning, and, with ``text``, its text as the step's message; whether it had
@@ -219,15 +237,15 @@ class BrowserUseAtif(Adapter):
                 parts.append(json.dumps(item, ensure_ascii=False))
         return parts or [""]
 
-    def _until(self, at: datetime | None, turn: Any) -> None:
+    def _until(self, at: datetime | None, turn: Any, *, answered: bool = True) -> None:
         """Write the model calls that ended before ``at``, every one left when None: each compaction's summary, after
-        the requests sent before it, then the requests sent before ``at``, the last one not refused answered by the
-        response ending there."""
+        the requests sent before it, then the requests sent before ``at``, with ``answered`` the last one not refused
+        answered by the response ending there."""
         while self._summaries and (at is None or self._summaries[0][0] < at):
             written, record = self._summaries.pop(0)
             self._requests(written, True, turn)
             self._summary(record, turn)
-        self._requests(at, at is not None, turn)
+        self._requests(at, answered and at is not None, turn)
 
     def _requests(self, at: datetime | None, answered: bool, turn: Any) -> None:
         """The requests sent before ``at``: with ``answered``, the last one the endpoint didn't refuse is the call a
@@ -251,7 +269,8 @@ class BrowserUseAtif(Adapter):
             turn.step(key=key, llm_call_count=0, model_name=self._model, time=attempt.get("timestamp"))
             turn.error(message=f"the endpoint refused the call (HTTP {status})", kind="infra_error", step=key)
         else:
-            turn.step(key=key, model_name=self._model, time=attempt.get("started"))
+            turn.step(key=key, model_name=self._model, reasoning_effort=self._effort_in_effect(),
+                      time=attempt.get("started"))
             turn.error(message=f"the call's response (HTTP {status}) never reached the agent" if status else
                        "the call got no answer", kind="infra_error", step=key)
         self._last = None
@@ -260,7 +279,7 @@ class BrowserUseAtif(Adapter):
         """A compaction's summarizer call: the step of the summary that replaced the conversation in what the model
         sees, or, when the harness kept the conversation whole after all, a step of its usage noting why."""
         response = record["response"]
-        key, when = self._key(response, "summary"), response.get("timestamp")
+        key, when = self._key("summary"), response.get("timestamp")
         turn.step(key=key, model_name=_string(response.get("model_name")), time=when, **_usage(response.get("usage")))
         self._content(response, key, when, turn, text=bool(record.get("compacted")))
         if record.get("compacted"):

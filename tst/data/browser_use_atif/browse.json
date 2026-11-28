@@ -91,7 +91,7 @@
      "timestamp": "2026-11-28T06:54:31.600099Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "tool_use"
@@ -177,7 +177,7 @@
      "timestamp": "2026-11-28T06:54:34.139756Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "tool_use"
@@ -269,7 +269,7 @@
      "timestamp": "2026-11-28T06:54:35.537167Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "tool_use"
@@ -351,7 +351,7 @@
      "timestamp": "2026-11-28T06:54:36.854419Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "end_turn"
@@ -537,7 +537,7 @@
      "timestamp": "2026-11-28T06:54:31.600099Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "tool_use"
@@ -623,7 +623,7 @@
      "timestamp": "2026-11-28T06:54:34.139756Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "tool_use"
@@ -709,7 +709,7 @@
      "timestamp": "2026-11-28T06:54:35.537167Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "tool_use"
@@ -785,7 +785,7 @@
      "timestamp": "2026-11-28T06:54:36.854419Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "end_turn"
@@ -862,7 +862,7 @@
      "timestamp": "2026-11-28T06:54:42.682834Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "tool_use"
@@ -947,7 +947,7 @@
      "timestamp": "2026-11-28T06:54:45.113785Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "tool_use"
@@ -1032,7 +1032,7 @@
      "timestamp": "2026-11-28T06:54:47.206842Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "tool_use"
@@ -1118,7 +1118,7 @@
      "timestamp": "2026-11-28T06:54:48.799415Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "tool_use"
@@ -1203,7 +1203,7 @@
      "timestamp": "2026-11-28T06:54:51.155490Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "tool_use"
@@ -1289,7 +1289,7 @@
      "timestamp": "2026-11-28T06:54:52.820095Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "tool_use"
@@ -1381,7 +1381,7 @@
      "timestamp": "2026-11-28T06:54:54.343949Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "tool_use"
@@ -1463,7 +1463,7 @@
      "timestamp": "2026-11-28T06:54:56.968066Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "end_turn"

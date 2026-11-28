@@ -170,17 +170,22 @@ class BrowserUseAgent(AgentEnvAgent):
 
 def _feed_atif(trajectory: TrajectoryLog, result: dict, effort: str | None) -> None:
     """What the atif/1 adapter reads beside the messages, fed before them: the turn (its run's id, which the run's own
-    messages carry, how it ended, its answer and cost), and what agent.py kept that the messages don't hold."""
+    messages carry, how it ended, its answer and cost), and what agent.py kept that the messages don't hold, the
+    screenshots only of the run's own calls: its first requests prune the earlier turn's last ones, which that turn's
+    copy holds already."""
     messages, kept = result["messages"], result["atif"]
-    trajectory.aux("turn", {"run_id": messages[-1].get("run_id") if messages else None, "status": result["status"],
-                            "text": result["text"], "model": result["model"], "effort": effort,
-                            "cost_usd": result.get("cost_usd")})
+    run = messages[-1].get("run_id") if messages else None
+    trajectory.aux("turn", {"run_id": run, "status": result["status"], "text": result["text"], "model": result["model"],
+                            "effort": effort, "cost_usd": result.get("cost_usd")})
     for attempt in kept["attempts"]:
         trajectory.aux("attempt", attempt)
     for summary in kept["summaries"]:
         trajectory.aux("summary", summary)
+    returned = {part.get("tool_call_id") for message in messages if message.get("run_id") == run
+                for part in message.get("parts") or () if part.get("part_kind") == "tool-return"}
     for call_id, images in kept["images"].items():
-        trajectory.aux("images", {"tool_call_id": call_id, "images": images})
+        if call_id in returned:
+            trajectory.aux("images", {"tool_call_id": call_id, "images": images})
 
 
 def _usage(result: dict, tool_calls: int) -> Usage:

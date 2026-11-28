@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from agentenv_protocol.atif import Fed, RecordedTask, TurnContext, check_adapter, errors_in, profile_of, validate
 
-from tst.unit.agents.browser_use.agent import AGENT_DIR, browser_use_atif
+from tst.unit.agents.browser_use.agent import AGENT_DIR, a2a_server, browser_use_atif
 
 BrowserUseAtif = browser_use_atif.BrowserUseAtif
 MODEL = "claude-haiku-4-5-20251001"
@@ -52,6 +52,11 @@ def thinking(text="", signature=None, part_id=None) -> dict:
 def text(content: str) -> dict:
     return {"content": content, "id": None, "provider_name": None, "provider_details": None, "citations": None,
             "part_kind": "text"}
+
+
+def effort(level: str | None, top_level=True) -> dict:
+    """The settings change Pydantic AI records in the request whose thinking effort differs from the one in effect."""
+    return {"settings": {"thinking": level}, "top_level": top_level, "part_kind": "model-settings-delta"}
 
 
 def call(call_id: str, name="python", args=None) -> dict:
@@ -226,6 +231,29 @@ def test_a_screenshot_browser_use_pruned_comes_back_from_what_agent_py_kept():
     assert results[1] == "page two\n\n[older screenshot removed]"
 
 
+class AuxLog:
+    def __init__(self) -> None:
+        self.fed: list[tuple[str, dict]] = []
+
+    def aux(self, name: str, record: dict) -> None:
+        self.fed.append((name, record))
+
+
+def test_the_server_feeds_the_screenshots_only_of_the_runs_own_calls():
+    """A run's first requests prune the earlier turn's last screenshots too, which that turn's copy holds already: in
+    the recorded browse scenario, two of the second turn's four entries and two thirds of its aux log."""
+    earlier = Feed(run="run-1").response(call("toolu_01")).returned("toolu_01", ["page one", binary(JPEG)])
+    feed = Feed(run="run-2", earlier=earlier.messages).response(call("toolu_02")).returned(
+        "toolu_02", ["page two", "[older screenshot removed]"])
+    feed.prune("toolu_01", 1, JPEG).prune("toolu_02", 1, PNG, "image/png")
+    log = AuxLog()
+    a2a_server._feed_atif(log, {"messages": feed.messages, "status": "completed", "text": "Example Domain",
+                                "model": "claude-haiku-4-5", "cost_usd": None,
+                                "atif": {"attempts": feed.attempts, "summaries": [], "images": feed.pruned}}, None)
+
+    assert [record["tool_call_id"] for name, record in log.fed if name == "images"] == ["toolu_02"]
+
+
 def test_tool_outcomes_map_to_result_statuses_and_mcp_tools_keep_their_names():
     feed = Feed().response(call("toolu_01", "python", {"code": "boom()"}), call("toolu_02", "browser__navigate",
                                                                                {"url": "https://example.com"}))
@@ -265,6 +293,22 @@ def test_thinking_is_summarized_redacted_or_withheld_reasoning(part, expected, r
 
     assert profile_of(step)["reasoning"] == [expected]
     assert step.get("reasoning_content") == reasoning_content
+
+
+def test_each_step_is_at_the_effort_the_conversations_settings_name_though_the_turn_configured_none():
+    """browser-use asks Claude for medium unless told otherwise and records it once, in the conversation's first
+    request, which a later turn's run returns again unstamped; a change from there on holds for what follows."""
+    first = Feed(run="run-1").ends(effort=None)
+    first.messages[0]["parts"].append(effort("medium"))
+    finished(first.response(call("toolu_01")).returned("toolu_01", "ok"), call_id="toolu_02")
+    second = Feed(run="run-2", earlier=first.messages, prompt="And its first link?").ends(effort=None)
+    finished(second.response(call("toolu_03")).request(effort("high", top_level=False)).returned("toolu_03", "ok"),
+             call_id="toolu_04")
+    configured = Feed().response(text("Example Domain"))
+
+    assert [s.get("reasoning_effort") for s in agent_steps(run(first, second).document)] == [
+        "medium", "medium", "medium", "high"]
+    assert agent_steps(run(configured).document)[0]["reasoning_effort"] == "low"
 
 
 def test_unsigned_thinking_from_an_openai_compatible_route_is_raw():
@@ -331,6 +375,19 @@ def test_a_call_cut_off_by_the_runs_budget_has_no_counts_so_the_totals_are_unkno
     assert profile_of(steps[0]["observation"]["results"][0])["status"] == "timeout"
 
 
+def test_a_call_its_deadline_cut_off_is_a_step_before_the_retry_feedback_it_led_to():
+    """browser-use asks again when a model request gets no answer in time, as Pydantic AI's retry: a new request holding
+    the feedback, stamped after the call that got none."""
+    feed = Feed().attempt(None)
+    feed.request({"content": "The model request got no answer within 300.0 s.", "retry": {
+        "cause": "model_retry", "attempt": 1, "max_retries": 5}, "timestamp": Feed.tick(), "part_kind": "retry-feedback"})
+    steps = run(feed.response(text("Example Domain"))).document["steps"]
+
+    assert [s["source"] for s in steps] == ["user", "agent", "system", "agent"]
+    assert profile_of(steps[1])["error"]["message"] == "the call got no answer"
+    assert steps[1]["timestamp"] < steps[2]["timestamp"] < steps[3]["timestamp"]
+
+
 def test_a_compactions_summary_is_a_step_where_it_was_written_and_its_usage_counts():
     feed = Feed().response(call("toolu_01"), counts=usage(1000, 10, 0, 0, None)).returned("toolu_01", "ok")
     feed.summary("The user wants example.com's heading.", usage(800, 60, 0, 0, None))
@@ -385,6 +442,15 @@ def test_a_response_that_gave_no_usage_has_no_counts():
                        .document)[0]
 
     assert "metrics" not in step and step["llm_call_count"] == 1
+
+
+def test_responses_whose_provider_ids_repeat_are_steps_of_their_own():
+    """An OpenAI-compatible server may give two responses one id: Ollama's draws them from a thousand."""
+    feed = Feed().response(text("Opening it."), call("call_1"), response_id="chatcmpl-7").returned("call_1", "ok")
+    steps = agent_steps(run(feed.response(text("Example Domain"), response_id="chatcmpl-7")).document)
+
+    assert [s["message"] for s in steps] == ["Opening it.", "Example Domain"]
+    assert [s["metrics"]["prompt_tokens"] for s in steps] == [1200, 1200]
 
 
 def test_from_atif_gives_pydantic_ai_messages_back():

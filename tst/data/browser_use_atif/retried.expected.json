@@ -1,0 +1,342 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-browser-use-retried",
+ "agent": {
+  "name": "browser-use",
+  "version": "2.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:55:47.384995Z",
+   "source": "user",
+   "message": "Open https://example.com in the browser, take a screenshot so the image comes back to you, then take two more, one after scrolling down and one after scrolling back up, and reply with the main heading you see.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-browser-use-retried",
+     "task_id": "f878fbb3-47a8-4247-9adc-a9a73c7978dd",
+     "message_id": "18b71aa16cd940de9f97ba58f1f7d1e5",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:55:51.496931Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5-20251001",
+   "reasoning_effort": "medium",
+   "message": "",
+   "reasoning_content": "The user wants me to:\n1. Open https://example.com in a browser\n2. Take a screenshot\n3. Scroll down and take another screenshot\n4. Scroll back up and take another screenshot\n5. Reply with the main heading I see\n\nI'll start by opening the URL, then take screenshots at different scroll positions, and identify the main heading.",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_017ADaYN2yY1a7QUcr91F4XX",
+     "function_name": "python",
+     "arguments": {
+      "code": "\n# Open the browser and navigate to example.com\nnew_tab(\"https://example.com\")\nwait_for_load()\n\n# Take the first screenshot\nimg1 = screenshot()\nprint(\"First screenshot taken\")\n"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_017ADaYN2yY1a7QUcr91F4XX",
+      "content": [
+       {
+        "type": "text",
+        "text": "First screenshot taken\n"
+       },
+       {
+        "type": "image",
+        "source": {
+         "media_type": "image/jpeg",
+         "path": "media/81977505ce04546845544ff60c8a8a535c41453d76415ab37bef9bb78f7c0085.jpg"
+        }
+       }
+      ],
+      "extra": {
+       "agentenv": {
+        "media": {
+         "media/81977505ce04546845544ff60c8a8a535c41453d76415ab37bef9bb78f7c0085.jpg": {
+          "sha256": "81977505ce04546845544ff60c8a8a535c41453d76415ab37bef9bb78f7c0085",
+          "bytes": 39762,
+          "width": 800,
+          "height": 600
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 2744,
+    "cached_tokens": 0,
+    "completion_tokens": 186,
+    "cost_usd": 0.003674,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0,
+      "cost_source": "harness"
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "reasoning": [
+      {
+       "chars": 325,
+       "visibility": "summary",
+       "signature": "Eq0ECoQBCBQQAhgCKkC7a/316wI4VukJcVL6cuDbv+bU13bN72fFIyGcdXFdMx+Od256Q6o8tCdsCe4rQ4FDe5+nWZAmBk3/PCcoWLNBMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOABCCHRoaW5raW5nWgw0Nzg0NTY3OTEwNjWoAfb1qdgGEgz08D4+9IcVIz+LuO4aDJrVvQFacZvarGP9qiIwZSrFrG5ZvwWH8T/i+AGEtmOHDMCti5K2jxs1ciQ7f5DArkkTGqWhcnK5cJbZ3vhmKtUCgLwGOcAxpP+z5EKsHGxZShH2kA5/TOU5Re4N+TQFhMpB087gPAipQDjWsh98L5fruzwP47ImprpCiSxTcqr3HrlOa83x3ndpzVouQQQ7MjoFbESjapDJfvAP2fkG+3JOqkK8iNM24QNzAd7muCrLam1VqLsbSg/tmo4vometfC2GHXQrRjX2wqvxWhBSOPyYYbEGrvpZTHYNYA6lI9Jw7qoITZ79pfRAg9WikRdZ3A+mo6eoZj8oA/1j7KCtBBJJZtt7sDSM9Brhj6M23zx/bu7kZgClJiaKu7uKV0FG4O2S29YaTxiPxScS0+OPsgYmggE3NUvdfh9bq+WpWqwVdPE5S62Fv57pSu/GyZRnVb+6P1xy+VvP6gW1+co+k1SWEF9o2nVVc5iCYHgf7C/DEspD9oLloesTumUZjyxu4vMwOuQ7Qz2ZrpqAI9AilxHfBesQLXoYAQ=="
+      }
+     ]
+    }
+   }
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:55:52.063825Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "the endpoint refused the call (HTTP 503)"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:55:52.485031Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "the endpoint refused the call (HTTP 503)"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-28T06:55:54.772531Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5-20251001",
+   "reasoning_effort": "medium",
+   "message": "Good! Now let me scroll down and take another screenshot:",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01Kva4wLCNCVrtYSN4XMSGay",
+     "function_name": "python",
+     "arguments": {
+      "code": "\n# Scroll down\nscroll(0, 400, dy=600)\n\n# Take the second screenshot after scrolling down\nimg2 = screenshot()\nprint(\"Second screenshot taken (after scrolling down)\")\n"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01Kva4wLCNCVrtYSN4XMSGay",
+      "content": [
+       {
+        "type": "text",
+        "text": "Second screenshot taken (after scrolling down)\n"
+       },
+       {
+        "type": "image",
+        "source": {
+         "media_type": "image/jpeg",
+         "path": "media/f04aa7ed4b085d2369db3e23d705b2979010ade7f87df213656b761591233420.jpg"
+        }
+       }
+      ],
+      "extra": {
+       "agentenv": {
+        "media": {
+         "media/f04aa7ed4b085d2369db3e23d705b2979010ade7f87df213656b761591233420.jpg": {
+          "sha256": "f04aa7ed4b085d2369db3e23d705b2979010ade7f87df213656b761591233420",
+          "bytes": 46785,
+          "width": 800,
+          "height": 600
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 3605,
+    "cached_tokens": 0,
+    "completion_tokens": 110,
+    "cost_usd": 0.004155,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0,
+      "cost_source": "harness"
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-28T06:55:56.132038Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5-20251001",
+   "reasoning_effort": "medium",
+   "message": "Now let me scroll back up and take the third screenshot:",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01R7UE8KUXUbdjwkYk5nGAJc",
+     "function_name": "python",
+     "arguments": {
+      "code": "\n# Scroll back up\nscroll(0, 400, dy=-600)\n\n# Take the third screenshot after scrolling back up\nimg3 = screenshot()\nprint(\"Third screenshot taken (after scrolling back up)\")\n"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01R7UE8KUXUbdjwkYk5nGAJc",
+      "content": [
+       {
+        "type": "text",
+        "text": "Third screenshot taken (after scrolling back up)\n"
+       },
+       {
+        "type": "image",
+        "source": {
+         "media_type": "image/jpeg",
+         "path": "media/81977505ce04546845544ff60c8a8a535c41453d76415ab37bef9bb78f7c0085.jpg"
+        }
+       }
+      ],
+      "extra": {
+       "agentenv": {
+        "media": {
+         "media/81977505ce04546845544ff60c8a8a535c41453d76415ab37bef9bb78f7c0085.jpg": {
+          "sha256": "81977505ce04546845544ff60c8a8a535c41453d76415ab37bef9bb78f7c0085",
+          "bytes": 39762,
+          "width": 800,
+          "height": 600
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 4396,
+    "cached_tokens": 0,
+    "completion_tokens": 113,
+    "cost_usd": 0.004961,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0,
+      "cost_source": "harness"
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 7,
+   "timestamp": "2026-11-28T06:55:58.242547Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5-20251001",
+   "reasoning_effort": "medium",
+   "message": "Perfect! Now let me extract the main heading from the page:",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01DwYNux8rxG7amzJuAM1Nur",
+     "function_name": "python",
+     "arguments": {
+      "code": "\n# Get the page content to find the main heading\npage_content = js(\"document.documentElement.innerText\")\nprint(page_content[:500])\n\n# Also check for h1 or main heading elements\nheading = js(\"document.querySelector('h1') ? document.querySelector('h1').innerText : (document.querySelector('h2') ? document.querySelector('h2').innerText : null)\")\nprint(\"\\nHeading found:\", heading)\n"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01DwYNux8rxG7amzJuAM1Nur",
+      "content": "This domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for testing and monitoring purposes.\n\nهذا النطاق مُخصص للاستخدام في أمثلة التوثيق دون الحاجة إلى إذن. هذه ليست خدمة، يُرجى تجنب الاعتماد عليها لأغراض الاختبار والمراقبة.\n\n该域名仅用于文档示例，无需获得许可。这并非一项服务，请勿将其用于测试和监控目的。\n\nL’usage de ce domaine est réservé à des exemples de documentation, sans autorisation préalable. Il ne s’agit pas d’un service ; son utilisation à des fins de test ou d\n\nHeading found: None\n"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 4537,
+    "cached_tokens": 0,
+    "completion_tokens": 166,
+    "cost_usd": 0.005367,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0,
+      "cost_source": "harness"
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 8,
+   "timestamp": "2026-11-28T06:56:00.192857Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5-20251001",
+   "reasoning_effort": "medium",
+   "message": "The main heading on https://example.com is:\n\n**\"This domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for testing and monitoring purposes.\"**\n\nThis is the primary text displayed on the page. The page also shows this information in multiple languages (Arabic, Chinese, French, Russian, and Spanish), along with an icon at the top. The heading essentially explains the purpose of the example.com domain for documentation use.",
+   "metrics": {
+    "prompt_tokens": 4933,
+    "cached_tokens": 0,
+    "completion_tokens": 104,
+    "cost_usd": 0.005453,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0,
+      "cost_source": "harness"
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 20215,
+  "total_completion_tokens": 679,
+  "total_cached_tokens": 0,
+  "total_cost_usd": 0.02361,
+  "total_steps": 8,
+  "extra": {
+   "agentenv": {
+    "cost_source": "harness",
+    "total_cache_write_tokens": 0
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "browser-use-messages/1",
+   "adapter": {
+    "name": "browser-use-messages-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

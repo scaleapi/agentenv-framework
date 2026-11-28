@@ -3,9 +3,10 @@ histories and workspaces (screenshots, compaction archives) under ``~/.browser-u
 recording network that every scenario drives over CDP, as cdp-config/v1 gives it, never Playwright MCP. Its own
 scenarios: two turns of one conversation on example.com, its screenshots returned to the model, more than two so
 browser-use prunes the oldest; signed thinking at a high effort; a two-step budget, which ends in browser-use's
-delivery-only turn; a run budget of one second, which cuts its request off; and the endpoint failing calls the SDK
-retries. Chrome answers DevTools only to a Host that is an IP or localhost, so the endpoint is the browser's address on
-the network. The fault proxy appends the path to ``LITELLM_BASE_URL``'s, so record with it unsuffixed by ``/v1``, as the
+delivery-only turn; a run budget of one second on a browsing task, which cuts off its request or the cell after it (a
+bare reply can finish within the second, as one recorded run did); and the endpoint failing calls the SDK retries.
+Chrome answers DevTools only to a Host that is an IP or localhost, so the endpoint is the browser's address on the
+network. The fault proxy appends the path to ``LITELLM_BASE_URL``'s, so record with it unsuffixed by ``/v1``, as the
 Anthropic route calls ``/v1/messages``."""
 import json
 
@@ -51,7 +52,7 @@ SPEC = {
         "thinking": {"config": {"effort": "high"}, "prompts": [
             "Open https://example.com, think about what the page is for, and reply with one sentence saying so."]},
         "delivery": {"config": {"max_steps": 2}, "prompts": [EXAMPLE]},
-        "cut": {"config": {"timeout_seconds": 101}, "prompts": ["Reply with ok."]},
+        "cut": {"config": {"timeout_seconds": 101}, "prompts": [EXAMPLE]},
         "retried": {"faults": "retry", "prompts": [EXAMPLE]},
     },
 }

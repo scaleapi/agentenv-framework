@@ -89,7 +89,7 @@
      "timestamp": "2026-11-28T06:55:43.655029Z",
      "kind": "response",
      "provider_name": "anthropic",
-     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_url": "http://litellm.test",
      "canonical_system": null,
      "provider_details": {
       "finish_reason": "end_turn"
