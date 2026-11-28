@@ -44,7 +44,7 @@ agent-env run agents --task browser-use-smoke
 | `agent-config/v1` | `model` (else `BROWSER_USE_A2A_MODEL`), `effort` (`low`, `medium` or `high`), `mode` (`default` or `ultrafast`, browser-use's accessibility-tree helpers), `system_prompt` (added to browser-use's instructions), `max_steps`, `browser`, `connect_by` (`ws` or `http`), `timeout_seconds`. No `web_tools`: browsing is its job, so a deploy that turns web tools off fails |
 | `cdp-config/v1` | SDK default; each turn reads its endpoint with `request.cdp_endpoint(browser)` |
 | `mcp-config/v1` | SDK default; each server's tools are listed per turn and called over streamable HTTP |
-| `trajectory/v1` | browser-use's messages, as Pydantic AI writes them, each turn's when it ends, format `browser-use-messages/1` |
+| `trajectory/v1` | browser-use's messages, as Pydantic AI writes them, each turn's when it ends, format `browser-use-messages/1`; `atif/1` too when the run prescribes it, built by `browser_use_atif.py` from the turn's own messages and what `agent.py` keeps beside them: each model request and its answer, each compaction's summary, and the screenshots browser-use pruned from the conversation |
 
 A turn's usage reports browser-use's tokens, cached ones among its input, with its model requests, cache reads and
 writes, and its cost when browser-use knows the model's price. A run that ends without delivering (`max_steps`,

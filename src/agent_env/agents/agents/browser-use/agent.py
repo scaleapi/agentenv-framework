@@ -7,7 +7,9 @@ profile of its bare name, since a provider prefix hides the model's thinking and
 through the OpenAI-compatible route, with the turn's effort as ``reasoning_effort``. The browser is the turn's CDP
 address: when it has one tab open, as a browser computer does, the agent drives that tab, which is the computer's
 screen, else a tab of its own. Each env's MCP tools are the agent's tools beside its REPL, named ``<server>__<tool>``.
-A context's turns continue one conversation through the turn's history file."""
+A context's turns continue one conversation through the turn's history file. A turn that builds an atif/1 copy also
+reports what the conversation doesn't hold: each model request and its answer, each compaction's summary, and each
+screenshot browser-use pruned from the conversation."""
 
 import asyncio
 import contextlib
@@ -15,12 +17,14 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx2
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient as AnthropicHttpxClient
 from browser_use import Agent, Browser, Tools
+from browser_use.agent import loop as browser_loop
 from browser_use.browser.browser import _daemon_request
 from browser_use.tools import TOOL_RETRIES
 from mcp import ClientSession
@@ -28,7 +32,7 @@ from mcp.client.streamable_http import streamable_http_client
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient as OpenAIHttpxClient
 from pydantic import TypeAdapter
 from pydantic_ai import ModelRetry, Tool
-from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest
+from pydantic_ai.messages import BinaryContent, ModelMessagesTypeAdapter, ModelRequest
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.anthropic import anthropic_model_profile
@@ -40,15 +44,27 @@ _CHECKPOINT = TypeAdapter(ModelRequest | None)
 # The model requests the turn sent, and those the endpoint refused (an error answer bills nothing): a request cut off
 # before its response, by the run's timeout or a retry, has no usage in the run's own count.
 CALLS = {"sent": 0, "refused": 0}
+# For an atif/1 copy: each model request, when it was sent, and when and how the endpoint answered it, if it did; each
+# compaction's summarizer response; and each screenshot browser-use pruned, by the call that returned it.
+ATTEMPTS: list[dict] = []
+SUMMARIES: list[dict] = []
+PRUNED: dict[str, list[dict]] = {}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 async def _sent(request) -> None:
     CALLS["sent"] += 1
+    ATTEMPTS.append({"started": _now()})
 
 
 async def _answered(response) -> None:
     if response.status_code >= 400:
         CALLS["refused"] += 1
+    # The run makes one model request at a time, so a response answers the last one sent.
+    ATTEMPTS[-1].update(status=response.status_code, timestamp=_now())
 
 
 HOOKS = {"request": [_sent], "response": [_answered]}
@@ -131,6 +147,33 @@ async def drive_its_tab(browser: Browser) -> None:
     await asyncio.to_thread(attach)
 
 
+def keep_for_atif() -> None:
+    """Have browser-use keep what its conversation doesn't hold: a compaction's summary, which its own call writes
+    outside it, and each screenshot, which it prunes from it before each request, keeping the last two results'."""
+    compact, prune = browser_loop._compact, browser_loop._prune_images
+
+    async def compact_keeping(session, messages, request_context):
+        summaries, covered = len(session.summaries), session.covered
+        try:
+            await compact(session, messages, request_context)
+        finally:
+            SUMMARIES.extend({"compacted": session.covered != covered,
+                              "response": ModelMessagesTypeAdapter.dump_python([summary], mode="json")[0]}
+                             for summary in session.summaries[summaries:])
+
+    def prune_keeping(messages):
+        pruned = prune(messages)
+        for before, after in zip(messages, pruned or ()):
+            for old, new in zip(before.parts, after.parts):
+                if old is not new:
+                    PRUNED[old.tool_call_id] = [{"index": index, "media_type": item.media_type, "data": item.base64}
+                                                for index, item in enumerate(old.content)
+                                                if isinstance(item, BinaryContent) and item.is_image]
+        return pruned
+
+    browser_loop._compact, browser_loop._prune_images = compact_keeping, prune_keeping
+
+
 def restore(agent: Agent, history: Path) -> None:
     """Continue the conversation a context's earlier turns saved, as ``add_new_task`` continues one in process."""
     saved = json.loads(history.read_text())
@@ -148,6 +191,8 @@ def save(agent: Agent, history: Path) -> None:
 
 async def main() -> None:
     turn = json.loads(sys.stdin.read())
+    if turn["atif"]:
+        keep_for_atif()
     history = Path(turn["historyFile"])
     async with contextlib.AsyncExitStack() as stack:
         browser = Browser(cdp_url=turn["cdpUrl"])
@@ -171,6 +216,7 @@ async def main() -> None:
         "steps": result.steps, "usage": result.usage, "cost_usd": result.cost_usd, "model": turn["model"],
         "messages": ModelMessagesTypeAdapter.dump_python(result.messages, mode="json"), "prior": prior,
         "calls": CALLS,
+        **({"atif": {"attempts": ATTEMPTS, "summaries": SUMMARIES, "images": PRUNED}} if turn["atif"] else {}),
     }}), flush=True)
 
 
