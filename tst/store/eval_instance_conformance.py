@@ -115,14 +115,20 @@ def a_creation_stopped_partway_is_not_seen_and_running_it_again_finishes_it(root
     assert instance_store.get_slots(instance.id) == slots
 
 
-def a_different_record_under_a_recorded_id_is_refused(root):
+def a_different_record_under_a_recorded_id_is_refused_and_writes_nothing(root):
     instance = created_instance(root)
-    slot = f"{root}/tasks/a@2#1"
-    with pytest.raises(DuplicateKeyError):
-        instance_store.create_eval_instance(_instance(root, id=instance.id, settings=EvalSettings(k=9)), [])
+    planned = planned_slots(instance.id, [(f"{root}/tasks/a", 2)], k=1)
+    slot = planned[0].id
+    more = planned_slots(instance.id, [(f"{root}/tasks/a", 2), (f"{root}/tasks/b", 2)], k=2)
+    for differing in ((_instance(root, id=instance.id, settings=EvalSettings(k=9)), more), (instance, more), (instance, [])):
+        with pytest.raises(DuplicateKeyError):
+            instance_store.create_eval_instance(*differing)
+    assert instance_store.get_slots(instance.id) == planned
+    assert instance_store.get_eval_instance(instance.id) == instance
+
     instance_store.append_attempt(instance.id, slot, _attempt("first"))
     with pytest.raises(DuplicateKeyError):
-        instance_store.create_eval_instance(instance, planned_slots(instance.id, [(f"{root}/tasks/a", 2)], k=1))
+        instance_store.create_eval_instance(instance, planned)
     assert len(instance_store.get_slot(instance.id, slot).attempts) == 1
 
 
@@ -174,7 +180,7 @@ CASES = [
     a_slot_write_counts_in_slots_rev_before_it_lands,
     each_eval_instance_keeps_its_own_slots,
     a_creation_stopped_partway_is_not_seen_and_running_it_again_finishes_it,
-    a_different_record_under_a_recorded_id_is_refused,
+    a_different_record_under_a_recorded_id_is_refused_and_writes_nothing,
     per_run_secrets_are_not_stored,
     eval_instances_list_newest_first_and_by_eval,
     an_unknown_status_or_slot_state_is_refused,

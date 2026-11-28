@@ -48,23 +48,37 @@ def ensure_indexes() -> None:
 def create_eval_instance(instance: EvalInstance, slots: Iterable[Slot]) -> None:
     """Record ``instance`` and its planned ``slots``: the slots first, then the instance, whose write is what makes
     them its. Running it again with the same record finishes a creation that stopped partway, or whose last write
-    landed unanswered; an instance or slot already stored with other contents is refused with DuplicateKeyError."""
+    landed unanswered. Once the instance is recorded nothing is written again: a call whose instance or slots differ
+    from what is stored, as after a slot moved on, is refused with DuplicateKeyError."""
     slots = list(slots)
     if strays := sorted({slot.eval_instance_id for slot in slots} - {instance.id}):
         raise ValueError(f"slots of {', '.join(strays)} given for eval instance {instance.id}")
     docs = _docs()
-    for slot in slots:
-        _insert_once(docs, EVAL_SLOTS_COLLECTION, Filter.of(eval_instance_id=instance.id, id=slot.id), slot.to_dict())
-    _insert_once(docs, EVAL_INSTANCES_COLLECTION, Filter.of(id=instance.id), instance.to_dict())
-
-
-def _insert_once(docs, collection: str, key: Filter, doc: dict) -> None:
-    doc = _strip_redacted_keys(doc)
+    record = _strip_redacted_keys(instance.to_dict())
+    planned = {slot.id: _strip_redacted_keys(slot.to_dict()) for slot in slots}
+    if (stored := docs.find_one(EVAL_INSTANCES_COLLECTION, Filter.of(id=instance.id))) is not None:
+        _refuse_unless_recorded_as(docs, stored, record, planned)
+        return
+    for slot_id, doc in planned.items():
+        try:
+            docs.insert(EVAL_SLOTS_COLLECTION, doc)
+        except DuplicateKeyError:
+            if docs.find_one(EVAL_SLOTS_COLLECTION, Filter.of(eval_instance_id=instance.id, id=slot_id)) != doc:
+                raise
     try:
-        docs.insert(collection, doc)
+        docs.insert(EVAL_INSTANCES_COLLECTION, record)
     except DuplicateKeyError:
-        if docs.find_one(collection, key) != doc:
-            raise
+        _refuse_unless_recorded_as(
+            docs, docs.find_one(EVAL_INSTANCES_COLLECTION, Filter.of(id=instance.id)), record, planned)
+
+
+def _refuse_unless_recorded_as(docs, stored: dict, record: dict, planned: dict[str, dict]) -> None:
+    """Accept a creation already done as asked; refuse one whose instance or slots are stored otherwise."""
+    if stored != record:
+        raise DuplicateKeyError(f"eval instance {record['id']} is recorded with other contents")
+    slots = docs.query(EVAL_SLOTS_COLLECTION, Filter.of(eval_instance_id=record["id"]))
+    if {doc["id"]: doc for doc in slots} != planned:
+        raise DuplicateKeyError(f"eval instance {record['id']} is recorded with other slots")
 
 
 def get_eval_instance(eval_instance_id: str) -> Optional[EvalInstance]:
