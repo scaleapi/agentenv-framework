@@ -171,3 +171,22 @@ def test_put_awaiting_stamps_future_datetime_expiry_for_ttl():
     expires_at = captured["expires_at"]
     assert isinstance(expires_at, datetime)
     assert expires_at > datetime.now(timezone.utc)
+
+
+def test_a_decision_stands_for_the_output_it_was_given_on(tmp_path):
+    """Registered again on the same output, a review keeps its decision; on another output it awaits one on that."""
+    from agent_env.store import LocalSqliteDocumentStore
+
+    set_document_store(LocalSqliteDocumentStore(str(tmp_path / "reviews.db")))
+    store = ReviewStore()
+    store.put_awaiting("inst-1", "cp1", upstream={"response": "first"})
+    assert store.set_decision("inst-1", "cp1", CONTINUE, decided_by="op@example.com")
+
+    store.put_awaiting("inst-1", "cp1", upstream={"response": "first"})
+    assert store.get("inst-1", "cp1")["state"] == CONTINUE
+
+    store.put_awaiting("inst-1", "cp1", upstream={"response": "second"})
+    record = store.get("inst-1", "cp1")
+    assert record["state"] == AWAITING
+    assert "decided_by" not in record
+    assert [r["upstream"] for r in store.list_awaiting()] == [{"response": "second"}]
