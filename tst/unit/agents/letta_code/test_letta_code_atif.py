@@ -76,9 +76,10 @@ class Feed:
         return self
 
     def init(self) -> Feed:
+        """The CLI's first line, which names the model by the handle the bridge creates the agent with."""
         return self.line({"type": "system", "subtype": "init", "session_id": AGENT, "agent_id": AGENT,
-                          "conversation_id": CONV, "model": MODEL, "tools": ["Bash", "Read", "Edit", "Glob", "Grep",
-                                                                             "Write", "Task"],
+                          "conversation_id": CONV, "model": f"openai-compatible/{MODEL}",
+                          "tools": ["Bash", "Read", "Edit", "Glob", "Grep", "Write", "Agent", "Task"],
                           "cwd": "/app", "mcp_servers": [], "permission_mode": "", "slash_commands": [],
                           "memfs_enabled": True, "skill_sources": ["bundled"], "system_info_reminder_enabled": True,
                           "reflection_trigger": "step-count", "reflection_step_count": 25, "uuid": f"init-{AGENT}"})
@@ -180,6 +181,18 @@ class Feed:
         return self.line({"type": "error", "message": message, "stop_reason": "error", "run_id": self.run,
                           "session_id": AGENT, "uuid": f"error-{self.run}"})
 
+    def transcript(self, agent: str, *messages: dict) -> Feed:
+        """What a sub-agent wrote to its transcript, pi-ai messages each in an entry, as the bridge feeds them once the
+        turn's processes are stopped: a session entry first, then each message with the time it was written."""
+        self.records.append(Fed({"type": "session", "version": 3, "id": "default", "timestamp": Clock.stamp(),
+                                 "cwd": "/app", "agent_id": agent}, aux="subagents"))
+        for message in messages:
+            millis = int(Clock.now().timestamp() * 1000)
+            self.records.append(Fed({"type": "message", "id": uuid.uuid4().hex[:8], "timestamp": Clock.stamp(),
+                                     "message": {**message, "timestamp": millis}, "agent_id": agent},
+                                    aux="subagents"))
+        return self
+
     def result(self) -> Feed:
         return self.line({"type": "result", "subtype": "success", "session_id": AGENT, "duration_ms": 4210,
                           "duration_api_ms": 3120, "num_turns": self.runs, "result": self.answer, "agent_id": AGENT,
@@ -263,6 +276,117 @@ def test_calls_only_the_relay_saw_are_steps_with_their_usage_in_their_place_the_
     assert_every_model_call_has_its_time_and_usage(kit.document)
 
 
+SPAWNED = ("Task running in background with task ID: task_1\nAgent ID: agent-local-sub\nConversation ID: default\n"
+           "Output file: /tmp/letta-background-0COLHm/task_1.log\n\nYou will be notified automatically when this task "
+           "completes.")
+
+
+def spawning() -> Feed:
+    """A turn whose Agent call starts a sub-agent, as the recorded one did: the sub-agent's two calls end while the
+    parent runs on, one before its next response is printed and one after, beside a reflection's call; its transcript
+    comes once the turn's processes are stopped."""
+    feed = Feed().init().respond("Starting it.", stop="requires_approval")
+    feed.tools(("call_A0", "Agent", {"description": "count", "prompt": "wc -l /etc/passwd"},
+                "Task tool missing required parameter: subagent_type.", "error"),
+               ("call_A1", "Agent", {"subagent_type": "general-purpose", "description": "count",
+                                     "prompt": "Run wc -l /etc/passwd and report the count."}, SPAWNED))
+    feed.relay(10812, 34)
+    feed.respond(prompt=23065, completion=20, cached=22912, stop="requires_approval")
+    feed.tools(("call_B1", "Bash", {"command": "sleep 2; cat /tmp/letta-background-0COLHm/task_1.log"}, "21\n"))
+    feed.relay(10860, 12, cached=10752).relay(4100, 30, model="openai/gpt-4.1-nano")
+    feed.respond("21", prompt=23269, completion=2, cached=23040).result()
+    return feed.transcript(
+        "agent-local-sub",
+        {"id": "ui-msg-1", "role": "user", "content": [{"type": "text", "text": "Run wc -l /etc/passwd."}]},
+        {"id": "ui-msg-2", "role": "assistant", "model": MODEL, "stopReason": "toolUse",
+         "content": [{"type": "toolCall", "id": "call_387I", "name": "Bash",
+                      "arguments": {"command": "wc -l /etc/passwd"}}],
+         "usage": {"input": 10812, "output": 34, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0}},
+        {"id": "ui-msg-3", "role": "toolResult", "toolCallId": "call_387I", "toolName": "Bash",
+         "content": [{"type": "text", "text": "21 /etc/passwd\n"}], "isError": False},
+        {"id": "ui-msg-4", "role": "assistant", "model": MODEL, "stopReason": "stop",
+         "content": [{"type": "text", "text": "The file /etc/passwd contains 21 lines."}],
+         "usage": {"input": 108, "output": 12, "cacheRead": 10752, "cacheWrite": 0, "reasoning": 0}})
+
+
+def test_a_sub_agent_the_agent_tool_started_is_embedded_under_its_call_with_the_relay_calls_it_made():
+    feed = spawning()
+    kit = run(feed)
+    steps = agent_steps(kit.document)
+    (sub,) = kit.document["subagent_trajectories"]
+
+    assert sub["trajectory_id"] == "agent-local-sub" and sub["agent"]["name"] == "general-purpose"
+    failed, started = steps[0]["observation"]["results"]
+    assert "subagent_trajectory_ref" not in failed
+    assert started["subagent_trajectory_ref"] == [{"trajectory_id": "agent-local-sub"}]
+    called, answered = sub["steps"]
+    assert called["tool_calls"][0]["arguments"] == {"command": "wc -l /etc/passwd"}
+    assert called["observation"]["results"] == [{"source_call_id": "call_387I", "content": "21 /etc/passwd\n"}]
+    assert answered["message"] == "The file /etc/passwd contains 21 lines."
+    assert [(step["model_name"], step["metrics"]["prompt_tokens"], step["metrics"]["cached_tokens"])
+            for step in sub["steps"]] == [(MODEL, 10812, 0), (MODEL, 10860, 10752)]
+    assert [step["metrics"]["prompt_tokens"] for step in steps] == [22860, 23065, 4100, 23269]
+    assert steps[-1]["message"] == "21"
+    assert_steps_sum_to_reported_usage(kit.document, [feed.usage()])
+    assert_every_model_call_has_its_time_and_usage(kit.document)
+    assert_every_call_has_its_result(kit.document)
+
+
+def test_without_its_transcript_a_sub_agents_calls_are_the_parents_side_steps_before_its_answer():
+    """As with a bridge that feeds no transcript, or a sub-agent stopped before it wrote one."""
+    feed = spawning()
+    feed.records = [fed for fed in feed.records if fed.aux != "subagents"]
+    kit = run(feed)
+    steps = agent_steps(kit.document)
+
+    assert "subagent_trajectories" not in kit.document
+    assert "subagent_trajectory_ref" not in steps[0]["observation"]["results"][1]
+    assert [step["metrics"]["prompt_tokens"] for step in steps] == [22860, 23065, 10812, 10860, 4100, 23269]
+    assert_steps_sum_to_reported_usage(kit.document, [feed.usage()])
+
+
+def test_a_sub_agent_one_started_is_embedded_under_its_agent_call_with_the_relay_calls_it_made():
+    """A depth-one sub-agent may start its own (the CLI's MAX_SUBAGENT_DEPTH is 2), whose transcript the bridge feeds
+    beside its parent's; the child's call ends between its parent's."""
+    feed = Feed().init().respond("Starting it.", stop="requires_approval")
+    feed.tools(("call_A1", "Agent", {"subagent_type": "general-purpose", "description": "count", "prompt": "p"},
+                SPAWNED))
+    feed.relay(10812, 34).relay(5100, 21)
+    feed.respond("Waiting on it.", prompt=23065, completion=20, cached=22912)
+    feed.relay(10860, 12, cached=10752).result()
+    started = SPAWNED.replace("task_1", "task_2").replace("agent-local-sub", "agent-local-nested")
+    feed.transcript(
+        "agent-local-sub",
+        {"id": "ui-msg-1", "role": "user", "content": [{"type": "text", "text": "Count them."}]},
+        {"id": "ui-msg-2", "role": "assistant", "model": MODEL, "stopReason": "toolUse",
+         "content": [{"type": "toolCall", "id": "call_N1", "name": "Agent",
+                      "arguments": {"subagent_type": "general-purpose", "description": "wc", "prompt": "wc -l"}}],
+         "usage": {"input": 10812, "output": 34, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0}},
+        {"id": "ui-msg-3", "role": "toolResult", "toolCallId": "call_N1", "toolName": "Agent",
+         "content": [{"type": "text", "text": started}], "isError": False},
+        {"id": "ui-msg-4", "role": "assistant", "model": MODEL, "stopReason": "stop",
+         "content": [{"type": "text", "text": "A helper is counting."}],
+         "usage": {"input": 108, "output": 12, "cacheRead": 10752, "cacheWrite": 0, "reasoning": 0}})
+    feed.transcript(
+        "agent-local-nested",
+        {"id": "ui-msg-1", "role": "user", "content": [{"type": "text", "text": "wc -l /etc/passwd"}]},
+        {"id": "ui-msg-2", "role": "assistant", "model": MODEL, "stopReason": "stop",
+         "content": [{"type": "text", "text": "21"}],
+         "usage": {"input": 5100, "output": 21, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0}})
+    kit = run(feed)
+    sub, nested = kit.document["subagent_trajectories"]
+
+    assert (sub["trajectory_id"], nested["trajectory_id"]) == ("agent-local-sub", "agent-local-nested")
+    assert nested["agent"]["name"] == "general-purpose"
+    (spawn,) = sub["steps"][0]["observation"]["results"]
+    assert spawn["subagent_trajectory_ref"] == [{"trajectory_id": "agent-local-nested"}]
+    assert [(step["message"], step["metrics"]["prompt_tokens"]) for step in nested["steps"]] == [("21", 5100)]
+    assert [step["metrics"]["prompt_tokens"] for step in sub["steps"]] == [10812, 10860]
+    assert [step["metrics"]["prompt_tokens"] for step in agent_steps(kit.document)] == [22860, 23065]
+    assert_steps_sum_to_reported_usage(kit.document, [feed.usage()])
+    assert_every_call_has_its_result(kit.document)
+
+
 def test_reasoning_streamed_is_joined_raw_and_hidden_reasoning_is_omitted():
     feed = Feed().init().respond("42", reasoning=("Six ", "times seven."), stop="end_turn")
     (thought,) = agent_steps(run(feed.result()).document)
@@ -331,6 +455,20 @@ def test_a_harness_retry_starts_an_attempt_after_the_runs_every_failed_call():
     assert_steps_sum_to_reported_usage(kit.document, [feed.usage()])
 
 
+def test_a_run_whose_stream_broke_after_its_output_began_is_its_step_holding_the_failure_with_its_call():
+    """The CLI retries a stream that broke ("terminated") after its first deltas in a new run; the relay answered that
+    call, without usage. It made one model call, not one plus a refused one."""
+    feed = Feed().init().new_run().say("Look", "ing").relay(None).failed("terminated").stop("llm_api_error")
+    feed.harness_retry()
+    kit = run(feed.respond("ok", prompt=22860, completion=2).result())
+    broken, answered = agent_steps(kit.document)
+
+    assert (broken["message"], broken["llm_call_count"], broken["model_name"]) == ("Looking", 1, MODEL)
+    assert "metrics" not in broken
+    assert profile_of(broken)["error"] == {"kind": "infra_error", "message": "terminated"}
+    assert answered["message"] == "ok" and profile_of(answered)["attempt"] == 2
+
+
 def test_a_compactions_summary_is_the_step_of_the_relay_call_that_wrote_it():
     feed = Feed().init().respond("Reading.", stop="requires_approval")
     feed.tools(("call_R1", "Read", {"file_path": "/app/big.log"}, "x" * 200))
@@ -352,6 +490,27 @@ def test_a_compactions_summary_is_the_step_of_the_relay_call_that_wrote_it():
     assert_steps_sum_to_reported_usage(kit.document, [feed.usage()])
 
 
+def test_a_compactions_summary_is_the_call_that_ended_before_it_was_printed_not_one_ending_during_the_run():
+    """The CLI prints a compaction's event and summary once the summarizer's call has ended; a side call that ends
+    while the run's own call streams is a step of its own."""
+    feed = Feed().init().respond("Reading.", stop="requires_approval")
+    feed.tools(("call_R1", "Read", {"file_path": "/app/big.log"}, "x" * 200))
+    feed.new_run().relay(98000, 900)
+    feed.chunk("event_message", event_type="compaction", event_data={"trigger": "context_window_limit"})
+    feed.chunk("summary_message", summary="The log was read.", compaction_stats={
+        "trigger": "context_window_limit", "context_tokens_before": 121000, "context_tokens_after": 9000})
+    feed.relay(4100, 30, model="openai/gpt-4.1-nano")
+    feed.say("Two errors.").relay(9400, 4).printed(9400, 4).stop()
+    feed.answer = "Two errors."
+    kit = run(feed.result())
+    steps = agent_steps(kit.document)
+
+    assert [(step["message"], step["model_name"], step["metrics"]["prompt_tokens"]) for step in steps] == [
+        ("Reading.", MODEL, 22860), ("The log was read.", MODEL, 98000), ("", "openai/gpt-4.1-nano", 4100),
+        ("Two errors.", MODEL, 9400)]
+    assert "compaction" in profile_of(steps[1]) and "compaction" not in profile_of(steps[2])
+
+
 def test_a_response_printed_without_usage_takes_the_relays_call_answered_without_any():
     feed = Feed().init().new_run().say("ok").relay(None).printed(0, 0).stop()
     feed.answer = "ok"
@@ -362,11 +521,29 @@ def test_a_response_printed_without_usage_takes_the_relays_call_answered_without
     assert feed.usage()["provider_details"] == {"model_calls": 1, "unreported_calls": 1}
 
 
-def test_without_the_relays_calls_a_run_takes_its_own_counts():
+def test_a_response_printed_without_usage_takes_the_call_answered_without_after_its_refused_ones():
+    """A side call answered without usage that ended first isn't the response's: the run's call was sent only after
+    its refused attempt."""
+    feed = Feed().init().respond("Reading.", stop="requires_approval")
+    feed.tools(("call_R1", "Read", {"file_path": "/app/a"}, "a"))
+    feed.relay(None, model="openai/gpt-4.1-nano")
+    feed.new_run().relay(status=503).retried("HTTP 503: upstream unavailable")
+    feed.say("ok").relay(None).printed(0, 0).stop("requires_approval")
+    feed.tools(("call_R2", "Read", {"file_path": "/app/b"}, "b"))
+    kit = run(feed.respond("done", prompt=23000, completion=2).result())
+    steps = agent_steps(kit.document)
+
+    assert [(step["message"], step["model_name"], step["llm_call_count"]) for step in steps] == [
+        ("Reading.", MODEL, 1), ("", "openai/gpt-4.1-nano", 1), ("", MODEL, 0), ("ok", MODEL, 1), ("done", MODEL, 1)]
+    assert profile_of(steps[2])["error"]["message"] == "HTTP 503: upstream unavailable"
+
+
+def test_without_the_relays_calls_a_run_takes_its_own_counts_and_the_model_as_called_not_the_clis_handle():
     feed = Feed().init().respond("5050", prompt=22993, completion=2, cached=22784, relay="none").result()
     (step,) = agent_steps(run(feed).document)
 
     assert step["metrics"]["prompt_tokens"] == 22993 and step["metrics"]["cached_tokens"] == 22784
+    assert step["model_name"] == MODEL
 
 
 def test_a_resumed_conversations_next_task_writes_its_own_steps_from_its_own_runs():
@@ -524,6 +701,48 @@ async def test_the_bridge_feeds_each_relay_call_as_aux_on_the_clis_clock(turn, m
     assert name == "calls" and record["type"] == "agentenv.model_call" and record["outcome"] == "answered"
     assert record["started"] == record["timestamp"] == "2031-05-06T07:08:09.000Z"
     assert record["usage"]["input_tokens"] == 9 == result.usage.input_tokens
+
+
+def write_conversation(home, name: str, agent: str, *entries: dict) -> None:
+    folder = home / bridge._CONVERSATIONS / name
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "conversation.json").write_text(json.dumps({"id": "default", "agent_id": agent}))
+    with (folder / "messages.jsonl").open("a") as transcript:
+        transcript.writelines(json.dumps(entry) + "\n" for entry in entries)
+
+
+@pytest.mark.asyncio
+async def test_the_bridge_feeds_what_the_turns_sub_agents_wrote_once_its_processes_are_stopped(turn, monkeypatch,
+                                                                                              tmp_path):
+    """Each entry a sub-agent wrote during the turn, with its agent's id, after the turn's calls: not the context's own
+    conversation, which stdout prints, nor what a sub-agent wrote in an earlier turn."""
+    home = bridge.context_data_dir("ctx")
+    earlier = {"type": "message", "id": "e0", "message": {"role": "assistant", "content": []}}
+    write_conversation(home, "old", "agent-local-old", earlier)
+    session = {"type": "session", "version": 3, "id": "default"}
+    answer = {"type": "message", "id": "e1", "message": {"role": "assistant", "content": [{"type": "text",
+                                                                                          "text": "21"}]}}
+
+    async def stream(proc, on_line):
+        write_conversation(home, "main", "agent-local-1", answer)
+        write_conversation(home, "old", "agent-local-old", answer)
+        write_conversation(home, "sub", "agent-local-sub", session, answer)
+        on_line(json.dumps({"type": "result", "subtype": "success", "result": "ok", "conversation_id": "c-1"}))
+        return b""
+
+    stopped = []
+    monkeypatch.setattr(bridge, "_stream_cli", stream)
+    monkeypatch.setattr(bridge, "_stop_leftovers", lambda marker: stopped.append(marker) or [])
+    fed = []
+
+    await bridge.run_letta_code("hi", "ctx", model="gpt-4.1-mini", workspace=str(tmp_path),
+                                aux_callback=lambda name, record: fed.append((name, record, list(stopped))))
+
+    assert [name for name, _, _ in fed] == ["calls", "subagents", "subagents", "subagents"]
+    assert [record for name, record, _ in fed if name == "subagents"] == [
+        {**answer, "agent_id": "agent-local-old"}, {**session, "agent_id": "agent-local-sub"},
+        {**answer, "agent_id": "agent-local-sub"}]
+    assert all(seen for name, _, seen in fed if name == "subagents")
 
 
 @pytest.mark.asyncio

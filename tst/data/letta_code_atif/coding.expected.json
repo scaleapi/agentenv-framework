@@ -1,0 +1,215 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-letta-code-coding",
+ "agent": {
+  "name": "Letta Code",
+  "version": "1.0.0",
+  "model_name": "openai/gpt-4.1-mini"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:54:47.227598Z",
+   "source": "user",
+   "message": "Create hello.py that prints the sum of the integers 1 to 100, run it with python3, and reply with only the number it prints.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-letta-code-coding",
+     "task_id": "bbe2dad3-bf0e-4f49-849d-81ec1f2d6437",
+     "message_id": "32f52268ca2d4261bd6b53877c986e51",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:54:52.594Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "call_Qhe1oelyBJWV9YNa6pGAUgT2",
+     "function_name": "Write",
+     "arguments": {
+      "file_path": "/app/hello.py",
+      "content": "print(sum(range(1, 101)))\n"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "call_Qhe1oelyBJWV9YNa6pGAUgT2",
+      "content": "Successfully wrote 26 characters to /app/hello.py"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 22865,
+    "cached_tokens": 0,
+    "completion_tokens": 32
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:54:54.067Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "call_gpNnhQhON5H9BZI6dMCiJVdS",
+     "function_name": "Bash",
+     "arguments": {
+      "command": "python3 /app/hello.py",
+      "description": "Run hello.py with python3"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "call_gpNnhQhON5H9BZI6dMCiJVdS",
+      "content": "5050\n"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 22915,
+    "cached_tokens": 22784,
+    "completion_tokens": 29
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:54:55.035Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "5050",
+   "metrics": {
+    "prompt_tokens": 22955,
+    "cached_tokens": 22784,
+    "completion_tokens": 3
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-28T06:54:55.264375Z",
+   "source": "user",
+   "message": "Now change it to sum 1 to 1000, run it again, and reply with only the number.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-letta-code-coding",
+     "task_id": "c7a6b448-1707-4453-84e9-09b62e9376b2",
+     "message_id": "23717a3b167d47e8bd8ab9497e0984f5",
+     "turn": 1
+    }
+   }
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-28T06:54:59.623Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "call_ax1akb20BNXA2YXqpfjGivYi",
+     "function_name": "Write",
+     "arguments": {
+      "file_path": "/app/hello.py",
+      "content": "print(sum(range(1, 1001)))\n"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "call_ax1akb20BNXA2YXqpfjGivYi",
+      "content": "Successfully wrote 27 characters to /app/hello.py"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 23789,
+    "cached_tokens": 5248,
+    "completion_tokens": 33
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 7,
+   "timestamp": "2026-11-28T06:55:00.939Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "call_0MKCGurVjRnZS1IiAxCOGnqp",
+     "function_name": "Bash",
+     "arguments": {
+      "command": "python3 /app/hello.py",
+      "description": "Run hello.py with python3"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "call_0MKCGurVjRnZS1IiAxCOGnqp",
+      "content": "500500\n"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 23531,
+    "cached_tokens": 22784,
+    "completion_tokens": 29
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 8,
+   "timestamp": "2026-11-28T06:55:02.745Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "500500",
+   "metrics": {
+    "prompt_tokens": 23571,
+    "cached_tokens": 23424,
+    "completion_tokens": 3
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 139626,
+  "total_completion_tokens": 129,
+  "total_cached_tokens": 97024,
+  "total_steps": 8
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "letta-code-events/1",
+   "adapter": {
+    "name": "letta-code-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

@@ -1,0 +1,184 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-letta-code-subagent",
+ "agent": {
+  "name": "Letta Code",
+  "version": "1.0.0",
+  "model_name": "openai/gpt-4.1-mini"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:55:56.017690Z",
+   "source": "user",
+   "message": "Use the Task tool to start a sub-agent that runs `wc -l /etc/passwd` and reports the count. Wait for its report, then reply with only that number.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-letta-code-subagent",
+     "task_id": "58779701-6c86-43c2-8a7a-d458a1bc22db",
+     "message_id": "8cbcd3f56d13460292e24f7176685b14",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:56:01.011Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "call_D8QDvckVdYTRkY193a7fVRZ8",
+     "function_name": "TaskCreate",
+     "arguments": {
+      "subject": "Count lines in /etc/passwd",
+      "description": "Start a sub-agent to run wc -l /etc/passwd and report the number of lines."
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "call_D8QDvckVdYTRkY193a7fVRZ8",
+      "content": "{\"taskId\":\"task_1\",\"subject\":\"Count lines in /etc/passwd\",\"description\":\"Start a sub-agent to run wc -l /etc/passwd and report the number of lines.\",\"status\":\"pending\",\"blocks\":[],\"blockedBy\":[],\"metadata\":{},\"createdAt\":1795848961018,\"updatedAt\":1795848961018}"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 22868,
+    "cached_tokens": 22400,
+    "completion_tokens": 43
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:56:02.290Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "call_xthopo2WMB3Zql4jSIuLIfAF",
+     "function_name": "Agent",
+     "arguments": {
+      "description": "Count lines in /etc/passwd file",
+      "prompt": "Run the command wc -l /etc/passwd and report only the count of lines in the file."
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "call_xthopo2WMB3Zql4jSIuLIfAF",
+      "content": "Task tool missing required parameter: subagent_type. Received parameters: description, prompt, signal, toolCallId",
+      "extra": {
+       "agentenv": {
+        "status": "error"
+       }
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 22992,
+    "cached_tokens": 22784,
+    "completion_tokens": 44
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:56:03.427Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "I forgot to specify the subagent_type for the task. I will correct that and start the sub-agent to count the number of lines in /etc/passwd.",
+   "tool_calls": [
+    {
+     "tool_call_id": "call_kLmGWnRU6HD9h7hnyzfzcQxt",
+     "function_name": "Agent",
+     "arguments": {
+      "subagent_type": "general-purpose",
+      "description": "Count lines in /etc/passwd file",
+      "prompt": "Run the command wc -l /etc/passwd and report only the count of lines in the file."
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "call_kLmGWnRU6HD9h7hnyzfzcQxt",
+      "content": "Task running in background with task ID: task_1\nAgent ID: agent-local-ebcf0c74-3684-4963-a9db-6f2be71d5823\nConversation ID: default\nOutput file: /tmp/letta-background-0COLHm/task_1.log\n\nYou will be notified automatically when this task completes — a <task-notification> message will be delivered with the result. No need to poll, sleep-wait, or check the output file. Just continue with your current work."
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 23065,
+    "cached_tokens": 22912,
+    "completion_tokens": 85
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-28T06:56:05.081Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 10812,
+    "cached_tokens": 0,
+    "completion_tokens": 34
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-28T06:56:06.051Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 10860,
+    "cached_tokens": 10752,
+    "completion_tokens": 12
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 7,
+   "timestamp": "2026-11-28T06:56:06.141Z",
+   "source": "agent",
+   "model_name": "openai/gpt-4.1-mini",
+   "message": "I have started a sub-agent to count the number of lines in the /etc/passwd file. I will wait for the sub-agent's report and then provide you with the line count.\nThe sub-agent is working on counting the lines in /etc/passwd. I will notify you with the result once the counting is done.",
+   "metrics": {
+    "prompt_tokens": 23269,
+    "cached_tokens": 23040,
+    "completion_tokens": 68
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 113866,
+  "total_completion_tokens": 286,
+  "total_cached_tokens": 101888,
+  "total_steps": 7
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "letta-code-events/1",
+   "adapter": {
+    "name": "letta-code-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}
