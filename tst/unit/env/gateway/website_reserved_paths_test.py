@@ -14,7 +14,9 @@ from tst.unit.env.gateway.changes_test import _Changelog, _gateway, _http, _Real
 @pytest.mark.parametrize(("path", "reserved"), [
     ("/agentenv", True), ("/agentenv/", True), ("/agentenv/data", True), ("//agentenv", True),
     ("/x/../agentenv", True), ("/./.well-known/agent-env.json", True), ("/.well-known/agent-env.json", True),
+    ("/AgentEnv", True), ("/AGENTENV/data", True), ("/x/../AgentEnv/", True), ("/.Well-Known/Agent-Env.json", True),
     ("/agentenv-help", False), ("/api/agentenv", False), ("/.well-known/other.json", False), ("/", False),
+    ("/AgentEnv-Help", False),
 ])
 def test_the_data_plane_and_card_are_reserved_however_their_path_is_spelled(path, reserved):
     assert reserved_site_path(path) is reserved
@@ -66,9 +68,9 @@ def test_a_sites_reserved_paths_are_the_ones_its_card_advertises_each_a_path_of_
     assert site_reserved_paths({"name": "x", "url": "http://elsewhere/agentenv?v=1"}) == frozenset({"/agentenv"})
     assert site_reserved_paths({"name": "x", "url": "http://elsewhere"}) == frozenset()
     reserved = site_reserved_paths(_CARD)
-    for path in ("/grade", "/grade/", "/x/../grade", "/grading/now", "/hooks/a"):
+    for path in ("/grade", "/grade/", "/x/../grade", "/grading/now", "/hooks/a", "/Grade", "/GRADING/Now", "/Hooks/a"):
         assert reserved_site_path(path, reserved), path
-    for path in ("/gold", "/grading", "/hooksy", "/"):
+    for path in ("/gold", "/grading", "/hooksy", "/", "/Grading", "/HooksY"):
         assert not reserved_site_path(path, reserved), path
 
 
