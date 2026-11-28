@@ -6,6 +6,7 @@ import pytest
 from agent_env.config import configure, get_config, reset_config
 from agent_env.eval import instance_store
 from agent_env.eval.instance import (
+    Attempt,
     EvalInstance,
     EvalInstanceStatus,
     EvalSettings,
@@ -74,6 +75,21 @@ def test_a_local_evals_records_stay_in_its_namespaces_store(root, namespace, rou
     assert instance_store.get_eval_instance(instance.id).slots_rev == 1
 
 
+def test_a_slot_lives_with_its_eval_instance_whatever_namespace_its_task_is_in(routed):
+    router, configured = routed
+    instance = _instance(LOCAL_EVAL)
+    hub_task = f"{HUB_EVAL}/tasks/a"
+    instance_store.create_eval_instance(instance, planned_slots(instance.id, [(hub_task, 1)], k=1))
+    instance_store.append_attempt(instance.id, f"{hub_task}@1#1", Attempt(
+        run_id="run-1", instance_id=f"{hub_task}-abcd1234", submitted_at="2026-11-27T10:00:00+00:00"))
+
+    assert {doc["id"] for doc in router.namespaces["local"].query(instance_store.EVAL_SLOTS_COLLECTION, Filter())} == {
+        f"{hub_task}@1#1"}
+    hub = router.namespaces["hf"]
+    assert not hub.path.exists() or hub.query(instance_store.EVAL_SLOTS_COLLECTION, Filter()) == []
+    assert configured.query(instance_store.EVAL_SLOTS_COLLECTION, Filter()) == []
+
+
 def test_a_registry_evals_records_go_to_the_configured_store(routed):
     router, configured = routed
     instance = _instance(REGISTRY_EVAL)
@@ -110,15 +126,15 @@ def test_an_eval_instance_records_what_its_runner_declared():
 
 def test_each_source_kind_round_trips():
     for source in (
-        EvalSource(kind="eval", eval_id="evals/smoke", eval_version=3),
-        EvalSource(kind="bundle", ref="./bench", content_hash="sha256:ab", eval_id=LOCAL_EVAL, eval_version=1),
-        EvalSource(kind="tasks", tasks=[{"task_id": "tasks/a", "task_version": 2}]),
+        EvalSource(kind=SourceKind.EVAL, eval_id="evals/smoke", eval_version=3),
+        EvalSource(kind=SourceKind.BUNDLE, ref="./bench", content_hash="sha256:ab", eval_id=LOCAL_EVAL, eval_version=1),
+        EvalSource(kind=SourceKind.TASKS, tasks=[{"task_id": "tasks/a", "task_version": 2}]),
     ):
         assert EvalSource.from_dict(source.to_dict()) == source
-        assert isinstance(source.kind, SourceKind)
+    assert EvalSource.from_dict({"kind": "bundle", "ref": "./bench"}).kind is SourceKind.BUNDLE
 
 
 def _instance(root) -> EvalInstance:
-    return EvalInstance(id=new_eval_instance_id(root), source=EvalSource(kind="eval", eval_id=root),
+    return EvalInstance(id=new_eval_instance_id(root), source=EvalSource(kind=SourceKind.EVAL, eval_id=root),
                         settings=EvalSettings(k=2), runner=RunnerDeclarations(type="local"),
                         created_at="2026-11-27T10:00:00+00:00")

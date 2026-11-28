@@ -2,6 +2,7 @@
 
 Each case is ``case(root)``, run with the store under test installed as the configured document store: ``root`` is
 the eval id its records are rooted in, bare or in a local namespace, so the cases also hold through namespace routing.
+No record in the store may use ``root`` yet: give each case its own, as this machine's local store outlives a test.
 Every document store must pass every case in ``CASES``.
 """
 
@@ -20,6 +21,7 @@ from agent_env.eval.instance import (
     RunnerDeclarations,
     Slot,
     SlotState,
+    SourceKind,
     new_eval_instance_id,
     planned_slots,
     slot_id,
@@ -137,7 +139,7 @@ CASES = [
 def _instance(root, **fields) -> EvalInstance:
     return EvalInstance(**{
         "id": new_eval_instance_id(root),
-        "source": EvalSource(kind="eval", eval_id=root, eval_version=3),
+        "source": EvalSource(kind=SourceKind.EVAL, eval_id=root, eval_version=3),
         "settings": EvalSettings(k=2, max_concurrency=4, overrides={"judge_model": "m"}),
         "runner": RunnerDeclarations(type="local"),
         "created_at": "2026-11-27T10:00:00+00:00",

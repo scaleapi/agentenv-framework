@@ -2,15 +2,20 @@
 
 Each case is ``await case(runner)`` on a runner the caller never started, as the CLI holds one, and stops after.
 The cases store their tasks with ``Task.put`` and read the run index and the task instances, so the runner's worker
-must share the caller's stores and have ``Step`` in its task-step registry. Every runner must pass every case in
-``CASES``.
+must share the caller's stores and have ``Step`` in its task-step registry. One case submits from a second process,
+``python -m tst.runner.conformance``, which builds the configured ``[runner]`` and exits as soon as its run starts, so
+the runner under test must be the configured one. Every runner must pass every case in ``CASES``.
 """
 
 import asyncio
+import os
+import sys
 import time
 import uuid
+from pathlib import Path
 
 from agent_env.config import get_config
+from agent_env.config.runtime import Config
 from agent_env.runner import store as run_store
 from agent_env.runner.runner import RunStatus
 from agent_env.store import Filter
@@ -23,6 +28,8 @@ POLL_SECONDS = 0.05
 # How long the step a submitter stops under naps, and so how long a run that outlives it takes to end.
 OUTLIVED_NAP_SECONDS = 1
 ATTEMPTS_COLLECTION = "runner_conformance_attempts"
+_RUN_ID = "run_id="
+_REPO = Path(__file__).resolve().parents[2]
 
 
 class Step(TaskStep):
@@ -107,17 +114,16 @@ async def a_run_it_does_not_have_or_that_ended_cannot_be_cancelled(runner):
 
 
 async def a_run_outlives_its_submitter_only_when_the_runner_says_so(runner):
-    """A runner whose runs outlive their submitter finishes one after ``stop``, so an eval resumed later reattaches to
-    it; any other leaves it unfinished, so the eval submits it again."""
+    """Submitted by a process that exits as soon as the run starts, as a killed eval driver does: a runner whose runs
+    outlive their submitter finishes the run, so an eval resumed later reattaches to it; any other never finishes it,
+    so the eval submits it again."""
     task = _put(Step(id="a", version=None, nap=OUTLIVED_NAP_SECONDS))
-    handle = await runner.submit(task.id, task.version)
-    await _until(runner, handle.run_id, lambda record: record.status is not RunStatus.QUEUED)
-    await runner.stop()
+    run_id = await _submit_from_a_process_that_exits(task)
     if runner.runs_outlive_submitter:
-        assert (await _until_recorded(handle.run_id)).status is RunStatus.COMPLETED
+        assert (await _until_ended(runner, run_id)).status is RunStatus.COMPLETED
     else:
         await asyncio.sleep(2 * OUTLIVED_NAP_SECONDS)
-        assert run_store.get_run(handle.run_id).status is not RunStatus.COMPLETED
+        assert (await runner.status(run_id)).status is not RunStatus.COMPLETED
 
 
 async def a_run_is_retried_after_an_infrastructure_failure_only_when_the_runner_says_so(runner):
@@ -153,13 +159,30 @@ async def _until_ended(runner, run_id):
     return await _until(runner, run_id, lambda record: record.status.is_terminal)
 
 
-async def _until_recorded(run_id):
-    """The run's index record once it ends, read from the store rather than a runner that has stopped."""
-    deadline = time.monotonic() + ENDED_WITHIN_SECONDS
-    while not (record := run_store.get_run(run_id)).status.is_terminal:
-        assert time.monotonic() < deadline, f"run {run_id} is still {record.status}"
-        await asyncio.sleep(POLL_SECONDS)
-    return record
+async def _submit_from_a_process_that_exits(task) -> str:
+    """The run id a second process submitted ``task`` under before it exited."""
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, (str(_REPO), os.environ.get("PYTHONPATH"))))}
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "tst.runner.conformance", task.id, str(task.version),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
+    out, err = await asyncio.wait_for(process.communicate(), ENDED_WITHIN_SECONDS)
+    assert process.returncode == 0, err.decode()[-2000:]
+    return next(line for line in out.decode().splitlines() if line.startswith(_RUN_ID)).removeprefix(_RUN_ID)
+
+
+async def _submit_and_leave(task_id: str, task_version: int) -> None:
+    """Submit with the configured runner, wait until the run starts, then exit at once: no ``stop()``, no cleanup."""
+    runner = get_config().get_runner()
+    handle = await runner.submit(task_id, task_version)
+    await _until(runner, handle.run_id, lambda record: record.status is not RunStatus.QUEUED)
+    print(f"{_RUN_ID}{handle.run_id}", flush=True)
+    os._exit(0)
+
+
+def register_step() -> None:
+    """Put ``Step`` in this process's task-step registry."""
+    steps = {**Config().task_step_registry(), Step.type: Step}
+    Config.task_step_registry = lambda self: steps
 
 
 def _attempts(marker: str) -> int:
@@ -172,3 +195,8 @@ async def _until(runner, run_id, done):
         assert time.monotonic() < deadline, f"run {run_id} is still {record and record.status}"
         await asyncio.sleep(POLL_SECONDS)
     return record
+
+
+if __name__ == "__main__":
+    register_step()
+    asyncio.run(_submit_and_leave(sys.argv[1], int(sys.argv[2])))

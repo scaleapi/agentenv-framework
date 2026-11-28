@@ -64,8 +64,9 @@ from agent_env.store.object_store.object_store import (
     UploadPolicy,
 )
 
-# The fields a run-time document names its owner by: one holding a local id places it in that id's namespace.
-_OWNER_FIELDS = ("id", "instance_id", "task_id", "task_instance_id", "env_id", "agent_id", "eval_instance_id")
+# The fields a run-time document names its owner by: the first holding a local id places it in that id's namespace.
+# An eval slot names its task too, so its eval instance comes first and the slot lives where the instance does.
+_OWNER_FIELDS = ("eval_instance_id", "id", "instance_id", "task_id", "task_instance_id", "env_id", "agent_id")
 _LOCAL_REPOSITORY_PREFIX = f"{LOCAL_NAMESPACE}/"
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
 _T = TypeVar("_T")
