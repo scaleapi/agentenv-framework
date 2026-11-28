@@ -1,7 +1,7 @@
 # The image installs the newest agentenv-framework-protocol at or above this floor; a release doesn't pin it, so the
-# image is built again only when this folder changes. The floor is the first with ModelUsage.of, which gives a model's
-# share of a turn from its calls; raise it when the agent needs a newer protocol.
-agentenv-framework-protocol[agent]>=0.1.643
+# image is built again only when this folder changes. The floor is the first whose atif/1 adapter kit and profile the
+# agent's adapter (antigravity_atif.py) is written against; raise it when the agent needs a newer protocol.
+agentenv-framework-protocol[agent]>=0.1.670
 # The Antigravity SDK, whose wheel for this platform holds its harness, a static Go binary; AntigravityTool in
 # antigravity_bridge.py names the tools of this version.
 google-antigravity==0.1.24

@@ -21,7 +21,7 @@ UV_SHA256_AARCH64=345a8308e4d1835cdfaadf692836fd3137a6d45864773f05ad7bf59442b1ba
 PYTHON_VERSION=3.12
 START_TIMEOUT_S=120
 STOP_TIMEOUT_S=10
-AGENT_FILES="a2a_server.py antigravity_bridge.py antigravity_date.py antigravity_kit.py requirements.txt run.sh agent_clock/agent_egress.py clock/clockpage.py model_relay/model_relay.py"
+AGENT_FILES="a2a_server.py antigravity_atif.py antigravity_bridge.py antigravity_date.py antigravity_kit.py requirements.txt run.sh agent_clock/agent_egress.py clock/clockpage.py model_relay/model_relay.py"
 
 # put SRC DEST replaces DEST by a rename, so a binary an earlier install's agent still runs can be replaced.
 case $mode in

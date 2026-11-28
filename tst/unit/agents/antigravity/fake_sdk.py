@@ -85,8 +85,9 @@ class ToolResult(_Model): ...
 @dataclass
 class Turn:
     """One scripted turn: its steps, each ``("chunk", obj)``, ``("call", hooked ToolCall)``, ``("result", ToolResult)``,
-    ``("error", tool error)``, ``("sleep", seconds)`` or ``("raise", exception)``; then the conversation id and stop
-    reason the turn ends with."""
+    ``("error", tool error)``, ``("sleep", seconds)``, ``("raise", exception)`` or ``("await", coroutine function)``,
+    as a model call the harness makes through the turn's relay; then the conversation id and stop reason the turn ends
+    with."""
 
     steps: list[tuple[str, Any]] = field(default_factory=list)
     conversation_id: str = "conv-1"
@@ -146,6 +147,8 @@ class ChatResponse:
                 await asyncio.sleep(value)
             elif kind == "raise":
                 raise value
+            elif kind == "await":
+                await value()
         self._agent.conversation_id = self._turn.conversation_id
         self.stop_reason = self._turn.stop_reason
 

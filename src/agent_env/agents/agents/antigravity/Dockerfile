@@ -22,7 +22,7 @@ WORKDIR /opt/agent
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 # install.sh and run.sh are install/v1's: in the image, so they stay in its build context.
-COPY a2a_server.py antigravity_bridge.py antigravity_date.py antigravity_kit.py entrypoint.sh install.sh run.sh ./
+COPY a2a_server.py antigravity_atif.py antigravity_bridge.py antigravity_date.py antigravity_kit.py entrypoint.sh install.sh run.sh ./
 # Every clocked agent's egress rule, which the bridge imports, the clock page's format it reads, and the model relay
 # that counts the turn's model calls (shared_sources.toml).
 COPY agent_clock/agent_egress.py clock/clockpage.py model_relay/model_relay.py ./
