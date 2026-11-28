@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 from urllib.parse import parse_qsl, urljoin, urlsplit
 from uuid import uuid4
 
@@ -29,7 +29,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.tools import Tool as FastMCPTool
 from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata, ArgModelBase
 from mcp.types import CallToolResult, TextContent, Tool as MCPTool
-from pydantic import create_model
+from pydantic import ConfigDict, create_model
 from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import WebSocketRoute
@@ -1695,7 +1695,12 @@ class Gateway:
             })
             return result
 
-        arg_model = self._create_arg_model_from_schema(tool_name, input_schema)
+        # The child validates its own arguments: the model declares none and forwards what the caller sent, as /step
+        # does, so a missing, misnamed, undeclared or wrong-typed argument gets the child's own answer. The one repair
+        # kept from the typed model: a JSON string for a declared parameter that takes no strings is decoded to the
+        # list, dict or null it holds when the parameter takes that.
+        arg_model = create_model(f"{tool_name}Args", __base__=_ForwardingArgModelBase)
+        arg_model.json_container_params = _json_container_params(input_schema)
         return FastMCPTool(
             fn=proxy,
             name=tool_name,
@@ -1854,8 +1859,8 @@ class Gateway:
 class _ProxyArgModelBase(ArgModelBase):
     """ArgModelBase subclass that excludes unset fields from model_dump_one_level().
 
-    This prevents the gateway proxy from forwarding null values for optional
-    parameters that the caller didn't provide. Pydantic's model_fields_set
+    This keeps a tool the gateway serves itself from receiving null values for
+    optional parameters that the caller didn't provide. Pydantic's model_fields_set
     tracks which fields were actually present in the input, so explicitly
     provided null values are still forwarded correctly.
     """
@@ -1869,6 +1874,77 @@ class _ProxyArgModelBase(ArgModelBase):
             output_name = field_info.alias if field_info.alias else field_name
             kwargs[output_name] = value
         return kwargs
+
+
+class _ForwardingArgModelBase(ArgModelBase):
+    """A child proxy's arguments: no declared fields, so nothing is required or typed, and every key the caller sent
+    (an explicit null included) is forwarded as sent. The exception is the JSON-string repair the gateway's typed model
+    used to give through FastMCP's pre-parsing: a string sent for a declared parameter that takes no strings is decoded
+    when it decodes to a list, dict or null the parameter takes (``_json_container_params``), so a model's '["a"]'
+    still reaches a strict child as a list and "null" as null."""
+
+    model_config = ConfigDict(extra="allow")
+    json_container_params: ClassVar[dict[str, tuple[type, ...]]] = {}
+
+    def model_dump_one_level(self) -> dict[str, Any]:
+        kwargs = dict(self.model_extra or {})
+        for name, kinds in self.json_container_params.items():
+            value = kwargs.get(name)
+            if not isinstance(value, str):
+                continue
+            try:
+                decoded = json.loads(value)
+            except ValueError:
+                continue
+            if isinstance(decoded, kinds):
+                kwargs[name] = decoded
+        return kwargs
+
+
+_JSON_CONTAINER_TYPES: dict[str, type] = {"array": list, "object": dict}
+
+
+_JSON_VALUE_TYPES: dict[type, str] = {str: "string", type(None): "null", list: "array", dict: "object", bool: "boolean"}
+_SCHEMA_REF_DEPTH = 8  # local $ref hops followed when typing a property; deeper (or cyclic) refs add no type
+
+
+def _schema_types(schema: Any, root: Any = None, depth: int = 0) -> set[str]:
+    """The JSON types a property schema allows: its `type` (a name or a list), those of its anyOf/oneOf/allOf branches
+    (allOf: [{$ref}] is how older pydantic and zod wrap a reference), and those of a local `$ref` (``#/$defs/...``,
+    ``#/definitions/...``) into ``root``, the tool's input schema, plus the types of its `enum` / `const` values.
+    Empty when the schema says nothing about type."""
+    if not isinstance(schema, dict) or depth > _SCHEMA_REF_DEPTH:
+        return set()
+    declared = schema.get("type")
+    types = {declared} if isinstance(declared, str) else {t for t in declared or () if isinstance(t, str)}
+    values = list(schema.get("enum") or ()) + ([schema["const"]] if "const" in schema else [])
+    types |= {_JSON_VALUE_TYPES.get(type(v), "number") for v in values}
+    for key in ("anyOf", "oneOf", "allOf"):
+        for branch in schema.get(key) or ():
+            types |= _schema_types(branch, root, depth + 1)
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/"):
+        target: Any = root
+        for part in ref[2:].split("/"):
+            part = part.replace("~1", "/").replace("~0", "~")
+            target = target.get(part) if isinstance(target, dict) else None
+        types |= _schema_types(target, root, depth + 1)
+    return types
+
+
+def _json_container_params(input_schema: dict[str, Any]) -> dict[str, tuple[type, ...]]:
+    """Each declared property that takes no string, with the Python types a JSON string sent for it may decode to, as
+    the typed model's FastMCP pre-parsing did: a list or dict when the child types it array or object, or names no
+    type at all (``{}``), and None (the string "null") always. A property that accepts a string keeps the string the
+    caller sent, and a string decoding to a number or boolean stays a string."""
+    params: dict[str, tuple[type, ...]] = {}
+    for name, schema in (input_schema.get("properties") or {}).items():
+        types = _schema_types(schema, input_schema)
+        if "string" in types:
+            continue
+        containers = types & _JSON_CONTAINER_TYPES.keys() if types else _JSON_CONTAINER_TYPES.keys()
+        params[name] = (*(_JSON_CONTAINER_TYPES[t] for t in sorted(containers)), type(None))
+    return params
 
 
 def _step_source(body: dict) -> dict | None:
