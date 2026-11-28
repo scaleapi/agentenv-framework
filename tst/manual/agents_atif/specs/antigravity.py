@@ -6,7 +6,7 @@ chunks."""
 
 SPEC = {
     "image": "agentenv-antigravity",
-    "model": "anthropic/claude-haiku-4-5",
+    "model": "gemini-2.5-flash",
     "files": "/data/.antigravity",
     "version": ["python3", "-c", "import importlib.metadata as m; print(m.version('google-antigravity'))"],
     "own": {

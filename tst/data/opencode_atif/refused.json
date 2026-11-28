@@ -1,0 +1,105 @@
+{
+ "scenario": "refused",
+ "cli": "1.17.18",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-opencode-refused",
+    "task_id": "e5703d12-1bc6-45b7-91ff-9adb9faa09e5",
+    "message_id": "c63e25bc89774f4eaaa0844eedf7c375",
+    "agent_name": "OpenCode",
+    "agent_version": "1.0.0",
+    "agent_model": "anthropic/claude-haiku-4-5",
+    "started_at": "2026-11-28T06:54:46.739897Z",
+    "inbound": [
+     "Reply with ok."
+    ],
+    "state": "failed",
+    "final": [
+     "APIError: refused by the recording proxy"
+    ],
+    "ended_at": "2026-11-28T06:54:48.950005Z",
+    "data": [
+     {
+      "data": {
+       "error_type": "cli_error",
+       "error_message": "APIError: refused by the recording proxy",
+       "error_code": "400"
+      }
+     }
+    ],
+    "error": {
+     "kind": "agent_error",
+     "message": "APIError: refused by the recording proxy",
+     "code": "400"
+    }
+   },
+   "native": [
+    {
+     "type": "error",
+     "timestamp": 1795848888885,
+     "sessionID": "ses_ddf10a229ffemJYB6ao0W8T2Hz",
+     "error": {
+      "name": "APIError",
+      "data": {
+       "message": "refused by the recording proxy",
+       "statusCode": 400,
+       "isRetryable": false,
+       "responseHeaders": {
+        "content-type": "application/json",
+        "date": "Sat, 28 Nov 2026 06:54:48 GMT",
+        "server": "BaseHTTP/0.6 Python/3.12.16",
+        "transfer-encoding": "chunked"
+       },
+       "responseBody": "{\"error\": {\"message\": \"refused by the recording proxy\", \"code\": 400}}",
+       "metadata": {
+        "url": "http://127.0.0.1:34549/7adef63af7e16b61cde25bc3fb0825a4/v1/chat/completions"
+       }
+      }
+     }
+    }
+   ],
+   "aux": [
+    {
+     "name": "turn",
+     "record": {
+      "type": "agentenv.turn",
+      "model": "anthropic/claude-haiku-4-5",
+      "effort": null
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 400,
+      "outcome": "refused",
+      "started": "2026-11-28T06:54:48.332Z",
+      "timestamp": "2026-11-28T06:54:48.338Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 400,
+      "outcome": "refused",
+      "started": "2026-11-28T06:54:48.738Z",
+      "timestamp": "2026-11-28T06:54:48.740Z"
+     },
+     "after": 0
+    }
+   ],
+   "usage": {
+    "tool_call_count": 0
+   }
+  }
+ ]
+}

@@ -1,0 +1,160 @@
+{
+ "scenario": "reasoning",
+ "cli": "1.17.18",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-opencode-reasoning",
+    "task_id": "8b81c4fd-fefb-44bb-91f9-c554c5433fbf",
+    "message_id": "159e66b8c73e47278ce7f2a3750ca5e8",
+    "agent_name": "OpenCode",
+    "agent_version": "1.0.0",
+    "agent_model": "anthropic/claude-haiku-4-5",
+    "started_at": "2026-11-28T06:55:42.486572Z",
+    "inbound": [
+     "Think it through, then reply with only the answer: how many positive integers below 1000 are divisible by 3 or 5 but not by 15?"
+    ],
+    "state": "completed",
+    "final": [
+     "I need to find positive integers below 1000 that are divisible by 3 or 5, but not by 15.\n\nLet me break this down:\n- Divisible by 3: floor(999/3) = 333 numbers\n- Divisible by 5: floor(999/5) = 199 numbers\n- Divisible by both 3 and 5 (i.e., divisible by 15): floor(999/15) = 66 numbers\n\nUsing inclusion-exclusion:\n- Numbers divisible by 3 or 5: 333 + 199 - 66 = 466\n\nBut I need to exclude those divisible by 15:\n- Numbers divisible by 3 or 5, but NOT by 15: 466 - 66 = 400\n\n**400**"
+    ],
+    "ended_at": "2026-11-28T06:55:46.600117Z"
+   },
+   "native": [
+    {
+     "type": "step_start",
+     "timestamp": 1795848944969,
+     "sessionID": "ses_ddf0fc87effexS5OoYqWtD30vz",
+     "part": {
+      "id": "prt_220f03d44001g66xyp5ehJWyuV",
+      "messageID": "msg_220f0396d001dQJL2nqInDNDsU",
+      "sessionID": "ses_ddf0fc87effexS5OoYqWtD30vz",
+      "type": "step-start"
+     }
+    },
+    {
+     "type": "text",
+     "timestamp": 1795848946148,
+     "sessionID": "ses_ddf0fc87effexS5OoYqWtD30vz",
+     "part": {
+      "id": "prt_220f03d47001XqWhxQKjw3TCC7",
+      "messageID": "msg_220f0396d001dQJL2nqInDNDsU",
+      "sessionID": "ses_ddf0fc87effexS5OoYqWtD30vz",
+      "type": "text",
+      "text": "I need to find positive integers below 1000 that are divisible by 3 or 5, but not by 15.\n\nLet me break this down:\n- Divisible by 3: floor(999/3) = 333 numbers\n- Divisible by 5: floor(999/5) = 199 numbers\n- Divisible by both 3 and 5 (i.e., divisible by 15): floor(999/15) = 66 numbers\n\nUsing inclusion-exclusion:\n- Numbers divisible by 3 or 5: 333 + 199 - 66 = 466\n\nBut I need to exclude those divisible by 15:\n- Numbers divisible by 3 or 5, but NOT by 15: 466 - 66 = 400\n\n**400**",
+      "time": {
+       "start": 1795848944967,
+       "end": 1795848946129
+      }
+     }
+    },
+    {
+     "type": "step_finish",
+     "timestamp": 1795848946148,
+     "sessionID": "ses_ddf0fc87effexS5OoYqWtD30vz",
+     "part": {
+      "id": "prt_220f041d5001g25W5DgAGVFM0s",
+      "reason": "stop",
+      "messageID": "msg_220f0396d001dQJL2nqInDNDsU",
+      "sessionID": "ses_ddf0fc87effexS5OoYqWtD30vz",
+      "type": "step-finish",
+      "tokens": {
+       "total": 9543,
+       "input": 360,
+       "output": 195,
+       "reasoning": 0,
+       "cache": {
+        "write": 0,
+        "read": 8988
+       }
+      },
+      "cost": 0
+     }
+    }
+   ],
+   "aux": [
+    {
+     "name": "turn",
+     "record": {
+      "type": "agentenv.turn",
+      "model": "anthropic/claude-haiku-4-5",
+      "effort": "high"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 603,
+       "output_tokens": 24,
+       "total_tokens": 627,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 0,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:44.034Z",
+      "timestamp": "2026-11-28T06:55:44.816Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 9348,
+       "output_tokens": 195,
+       "total_tokens": 9543,
+       "cache_read_tokens": 8988,
+       "cache_write_tokens": 357,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:44.466Z",
+      "timestamp": "2026-11-28T06:55:46.044Z"
+     },
+     "after": 1
+    }
+   ],
+   "usage": {
+    "tool_call_count": 0,
+    "input_tokens": 9951,
+    "output_tokens": 219,
+    "total_tokens": 10170,
+    "cache_read_tokens": 8988,
+    "cache_write_tokens": 357,
+    "cache_write_ttl_tokens": {
+     "5m": 357
+    },
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "anthropic/claude-haiku-4-5",
+      "calls": 2,
+      "input_tokens": 9951,
+      "output_tokens": 219,
+      "cache_read_tokens": 8988,
+      "cache_write_tokens": 357,
+      "input_includes_cache": true,
+      "cache_write_ttl_tokens": {
+       "5m": 357
+      }
+     }
+    ],
+    "provider_details": {
+     "model_calls": 2
+    }
+   }
+  }
+ ]
+}

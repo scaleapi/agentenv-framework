@@ -1,0 +1,293 @@
+{
+ "scenario": "subagent",
+ "cli": "1.17.18",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-opencode-subagent",
+    "task_id": "4a35aaee-b3d3-4d75-9b02-975dfef50b20",
+    "message_id": "4bf9eb3497a943c4ba33a0e4959146a1",
+    "agent_name": "OpenCode",
+    "agent_version": "1.0.0",
+    "agent_model": "anthropic/claude-haiku-4-5",
+    "started_at": "2026-11-28T06:55:07.800392Z",
+    "inbound": [
+     "Use your task tool to start a general sub-agent that runs `wc -l /etc/passwd` and reports the count back to you. Then reply with only that number."
+    ],
+    "state": "completed",
+    "final": [
+     "21"
+    ],
+    "ended_at": "2026-11-28T06:55:15.378840Z"
+   },
+   "native": [
+    {
+     "type": "step_start",
+     "timestamp": 1795848910495,
+     "sessionID": "ses_ddf104fc8ffejPdMNiTtCi0DMx",
+     "part": {
+      "id": "prt_220efb699001dsZRiy6AbnNGs9",
+      "messageID": "msg_220efb241001nlq4eOjJGSVVWV",
+      "sessionID": "ses_ddf104fc8ffejPdMNiTtCi0DMx",
+      "type": "step-start"
+     }
+    },
+    {
+     "type": "tool_use",
+     "timestamp": 1795848914641,
+     "sessionID": "ses_ddf104fc8ffejPdMNiTtCi0DMx",
+     "part": {
+      "type": "tool",
+      "tool": "task",
+      "callID": "toolu_vrtx_014vVG6fKrV476AA4xwBc7ES",
+      "state": {
+       "status": "completed",
+       "input": {
+        "subagent_type": "general",
+        "description": "Run wc command on passwd file",
+        "prompt": "Run the command `wc -l /etc/passwd` and report back the exact number of lines (the count) from the output. Only return the numerical count in your final message."
+       },
+       "output": "<task id=\"ses_ddf10454fffetSUqCU7z3uhXYG\" state=\"completed\">\n<task_result>\n21\n</task_result>\n</task>",
+       "metadata": {
+        "parentSessionId": "ses_ddf104fc8ffejPdMNiTtCi0DMx",
+        "sessionId": "ses_ddf10454fffetSUqCU7z3uhXYG",
+        "model": {
+         "modelID": "anthropic/claude-haiku-4-5",
+         "providerID": "litellm"
+        },
+        "truncated": false
+       },
+       "title": "Run wc command on passwd file",
+       "time": {
+        "start": 1795848911540,
+        "end": 1795848914631
+       }
+      },
+      "id": "prt_220efb69c001gPQCEZ3UAKeaVm",
+      "sessionID": "ses_ddf104fc8ffejPdMNiTtCi0DMx",
+      "messageID": "msg_220efb241001nlq4eOjJGSVVWV"
+     }
+    },
+    {
+     "type": "step_finish",
+     "timestamp": 1795848914641,
+     "sessionID": "ses_ddf104fc8ffejPdMNiTtCi0DMx",
+     "part": {
+      "id": "prt_220efc6c9001aQpvaQCiecMReY",
+      "reason": "tool-calls",
+      "messageID": "msg_220efb241001nlq4eOjJGSVVWV",
+      "sessionID": "ses_ddf104fc8ffejPdMNiTtCi0DMx",
+      "type": "step-finish",
+      "tokens": {
+       "total": 9482,
+       "input": 361,
+       "output": 133,
+       "reasoning": 0,
+       "cache": {
+        "write": 0,
+        "read": 8988
+       }
+      },
+      "cost": 0
+     }
+    },
+    {
+     "type": "step_start",
+     "timestamp": 1795848915210,
+     "sessionID": "ses_ddf104fc8ffejPdMNiTtCi0DMx",
+     "part": {
+      "id": "prt_220efc906001dCcbxi2kdUGapJ",
+      "messageID": "msg_220efc6ce001vLtb1Ye7iiVKyv",
+      "sessionID": "ses_ddf104fc8ffejPdMNiTtCi0DMx",
+      "type": "step-start"
+     }
+    },
+    {
+     "type": "text",
+     "timestamp": 1795848915273,
+     "sessionID": "ses_ddf104fc8ffejPdMNiTtCi0DMx",
+     "part": {
+      "id": "prt_220efc908001cEL4Dpqia0OXtt",
+      "messageID": "msg_220efc6ce001vLtb1Ye7iiVKyv",
+      "sessionID": "ses_ddf104fc8ffejPdMNiTtCi0DMx",
+      "type": "text",
+      "text": "21",
+      "time": {
+       "start": 1795848915208,
+       "end": 1795848915264
+      }
+     }
+    },
+    {
+     "type": "step_finish",
+     "timestamp": 1795848915274,
+     "sessionID": "ses_ddf104fc8ffejPdMNiTtCi0DMx",
+     "part": {
+      "id": "prt_220efc9420011rP9J9J5dZm5zo",
+      "reason": "stop",
+      "messageID": "msg_220efc6ce001vLtb1Ye7iiVKyv",
+      "sessionID": "ses_ddf104fc8ffejPdMNiTtCi0DMx",
+      "type": "step-finish",
+      "tokens": {
+       "total": 9544,
+       "input": 194,
+       "output": 4,
+       "reasoning": 0,
+       "cache": {
+        "write": 0,
+        "read": 9346
+       }
+      },
+      "cost": 0
+     }
+    }
+   ],
+   "aux": [
+    {
+     "name": "turn",
+     "record": {
+      "type": "agentenv.turn",
+      "model": "anthropic/claude-haiku-4-5",
+      "effort": null
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 604,
+       "output_tokens": 9,
+       "total_tokens": 613,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 0,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:09.426Z",
+      "timestamp": "2026-11-28T06:55:10.801Z"
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 9349,
+       "output_tokens": 133,
+       "total_tokens": 9482,
+       "cache_read_tokens": 8988,
+       "cache_write_tokens": 358,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:09.801Z",
+      "timestamp": "2026-11-28T06:55:11.504Z"
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 8430,
+       "output_tokens": 59,
+       "total_tokens": 8489,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 8427,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:11.597Z",
+      "timestamp": "2026-11-28T06:55:12.425Z"
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 8508,
+       "output_tokens": 4,
+       "total_tokens": 8512,
+       "cache_read_tokens": 8427,
+       "cache_write_tokens": 75,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:14.033Z",
+      "timestamp": "2026-11-28T06:55:14.617Z"
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 9540,
+       "output_tokens": 4,
+       "total_tokens": 9544,
+       "cache_read_tokens": 9346,
+       "cache_write_tokens": 189,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:14.663Z",
+      "timestamp": "2026-11-28T06:55:15.260Z"
+     },
+     "after": 4
+    }
+   ],
+   "usage": {
+    "tool_call_count": 1,
+    "input_tokens": 36431,
+    "output_tokens": 209,
+    "total_tokens": 36640,
+    "cache_read_tokens": 26761,
+    "cache_write_tokens": 9049,
+    "cache_write_ttl_tokens": {
+     "5m": 9049
+    },
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "anthropic/claude-haiku-4-5",
+      "calls": 5,
+      "input_tokens": 36431,
+      "output_tokens": 209,
+      "cache_read_tokens": 26761,
+      "cache_write_tokens": 9049,
+      "input_includes_cache": true,
+      "cache_write_ttl_tokens": {
+       "5m": 9049
+      }
+     }
+    ],
+    "provider_details": {
+     "model_calls": 5
+    }
+   }
+  }
+ ]
+}

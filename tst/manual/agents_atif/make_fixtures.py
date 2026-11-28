@@ -1,6 +1,6 @@
 """Write an agent's ATIF fixtures (``tst/data/<agent>_atif``, its name's dashes as underscores) from what ``record.py``
 recorded: one file per scenario, a context's turns, each its atif/1 final read's turn context and aux log, its native
-final read's events and the usage the turn reported. Then run the agent's recorded test as a script for the expected
+final read's events (none for a turn that failed before it had any) and the usage the turn reported. Then run the agent's recorded test as a script for the expected
 documents.
 
     python tst/manual/agents_atif/make_fixtures.py OUT AGENT"""
@@ -33,7 +33,8 @@ def main() -> None:
             if not isinstance(atif, dict) or "turn_context" not in atif:
                 print(folder.name, path.name, "has no atif/1 read:", str(atif)[:200])
                 continue
-            turns.append({"turn": atif["turn_context"], "native": recorded["native"]["trajectory"],
+            native = recorded["native"]
+            turns.append({"turn": atif["turn_context"], "native": native.get("trajectory", []) if isinstance(native, dict) else [],
                           "aux": atif.get("aux") or [], "usage": usage_of(recorded["task"])})
         if not turns:
             continue

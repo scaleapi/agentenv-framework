@@ -1,0 +1,386 @@
+{
+ "scenario": "retried",
+ "cli": "0.34.26",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-letta-code-retried",
+    "task_id": "ee9a2b93-86fd-47f4-b15f-8a33d891a439",
+    "message_id": "941d4ad9e64443b09219ae0034e1d0ae",
+    "agent_name": "Letta Code",
+    "agent_version": "1.0.0",
+    "agent_model": "openai/gpt-4.1-mini",
+    "started_at": "2026-11-28T06:55:42.445665Z",
+    "inbound": [
+     "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
+    ],
+    "state": "completed",
+    "final": [
+     "first second"
+    ],
+    "ended_at": "2026-11-28T06:55:51.653787Z"
+   },
+   "native": [
+    {
+     "type": "system",
+     "subtype": "init",
+     "session_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "agent_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "conversation_id": "local-conv-1",
+     "model": "openai-compatible/openai/gpt-4.1-mini",
+     "tools": [
+      "Bash",
+      "Monitor",
+      "WatchPR",
+      "Wake",
+      "EnterWorktree",
+      "ExitWorktree",
+      "SetWorkingDirectory",
+      "Edit",
+      "TaskStop",
+      "Read",
+      "Skill",
+      "Memory",
+      "CodeMode",
+      "Workflow",
+      "Agent",
+      "SendAgentMessage",
+      "TaskCreate",
+      "TaskGet",
+      "TaskList",
+      "TaskUpdate",
+      "Write",
+      "mcp__peer_agents__peer_list",
+      "mcp__peer_agents__peer_get_card",
+      "mcp__peer_agents__peer_send_message",
+      "mcp__peer_agents__peer_start_task",
+      "mcp__peer_agents__peer_get_task",
+      "mcp__peer_agents__peer_cancel_task"
+     ],
+     "cwd": "/app",
+     "mcp_servers": [],
+     "permission_mode": "",
+     "slash_commands": [],
+     "memfs_enabled": true,
+     "skill_sources": [
+      "bundled",
+      "global",
+      "agent",
+      "project"
+     ],
+     "system_info_reminder_enabled": true,
+     "reflection_trigger": "step-count",
+     "reflection_step_count": 25,
+     "uuid": "init-agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "timestamp": "2026-11-28T06:55:45.737Z"
+    },
+    {
+     "type": "message",
+     "id": "letta-msg-3",
+     "date": "2026-11-28T06:55:47.320Z",
+     "agent_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "conversation_id": "local-conv-1",
+     "message_type": "usage_statistics",
+     "step_count": 1,
+     "prompt_tokens": 583,
+     "completion_tokens": 56,
+     "total_tokens": 22911,
+     "cached_input_tokens": 22272,
+     "cache_write_tokens": 0,
+     "reasoning_tokens": 0,
+     "context_tokens": 22911,
+     "run_id": "local-run-1",
+     "seq_id": 3,
+     "session_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "uuid": "letta-msg-3",
+     "timestamp": "2026-11-28T06:55:47.320Z"
+    },
+    {
+     "type": "message",
+     "message_type": "stop_reason",
+     "stop_reason": "requires_approval",
+     "run_id": "local-run-1",
+     "seq_id": 4,
+     "session_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "uuid": "a7e57f9e-5556-4af6-8188-a4e9e002592f",
+     "timestamp": "2026-11-28T06:55:47.322Z"
+    },
+    {
+     "type": "message",
+     "message_type": "tool_call_message",
+     "id": "tool-call-call_urOMHZ9G2RlD1BsqbWRddidU",
+     "date": "2026-11-28T06:55:47.327Z",
+     "tool_call": {
+      "name": "Bash",
+      "tool_call_id": "call_urOMHZ9G2RlD1BsqbWRddidU",
+      "arguments": "{\"command\":\"echo first\",\"description\":\"Echo first\"}"
+     },
+     "session_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "uuid": "tool-call-call_urOMHZ9G2RlD1BsqbWRddidU",
+     "timestamp": "2026-11-28T06:55:47.327Z"
+    },
+    {
+     "type": "message",
+     "message_type": "tool_call_message",
+     "id": "tool-call-call_H8H0osqNBJf8CADTULqqWKkD",
+     "date": "2026-11-28T06:55:47.327Z",
+     "tool_call": {
+      "name": "Bash",
+      "tool_call_id": "call_H8H0osqNBJf8CADTULqqWKkD",
+      "arguments": "{\"command\":\"echo second\",\"description\":\"Echo second\"}"
+     },
+     "session_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "uuid": "tool-call-call_H8H0osqNBJf8CADTULqqWKkD",
+     "timestamp": "2026-11-28T06:55:47.327Z"
+    },
+    {
+     "type": "message",
+     "message_type": "tool_return_message",
+     "id": "tool-return-call_urOMHZ9G2RlD1BsqbWRddidU",
+     "date": "2026-11-28T06:55:47.378Z",
+     "status": "success",
+     "tool_call_id": "call_urOMHZ9G2RlD1BsqbWRddidU",
+     "tool_return": "first\n",
+     "session_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "uuid": "tool-return-call_urOMHZ9G2RlD1BsqbWRddidU",
+     "timestamp": "2026-11-28T06:55:47.378Z"
+    },
+    {
+     "type": "message",
+     "message_type": "tool_return_message",
+     "id": "tool-return-call_H8H0osqNBJf8CADTULqqWKkD",
+     "date": "2026-11-28T06:55:47.378Z",
+     "status": "success",
+     "tool_call_id": "call_H8H0osqNBJf8CADTULqqWKkD",
+     "tool_return": "second\n",
+     "session_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "uuid": "tool-return-call_H8H0osqNBJf8CADTULqqWKkD",
+     "timestamp": "2026-11-28T06:55:47.378Z"
+    },
+    {
+     "type": "message",
+     "id": "letta-msg-4",
+     "date": "2026-11-28T06:55:47.397Z",
+     "agent_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "conversation_id": "local-conv-1",
+     "message_type": "event_message",
+     "event_type": "retry",
+     "event_data": {
+      "attempt": 1,
+      "max_attempts": 3,
+      "delay_ms": 1000,
+      "message": "503: {\"message\":\"service unavailable\",\"code\":503}"
+     },
+     "run_id": "local-run-2",
+     "seq_id": 1,
+     "session_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "uuid": "letta-msg-4",
+     "timestamp": "2026-11-28T06:55:47.397Z"
+    },
+    {
+     "type": "message",
+     "id": "letta-msg-5",
+     "date": "2026-11-28T06:55:48.407Z",
+     "agent_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "conversation_id": "local-conv-1",
+     "message_type": "event_message",
+     "event_type": "retry",
+     "event_data": {
+      "attempt": 2,
+      "max_attempts": 3,
+      "delay_ms": 2000,
+      "message": "503: {\"message\":\"service unavailable\",\"code\":503}"
+     },
+     "run_id": "local-run-2",
+     "seq_id": 2,
+     "session_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "uuid": "letta-msg-5",
+     "timestamp": "2026-11-28T06:55:48.407Z"
+    },
+    {
+     "type": "message",
+     "id": "ui-msg-5",
+     "date": "2026-11-28T06:55:51.486Z",
+     "agent_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "conversation_id": "local-conv-1",
+     "message_type": "assistant_message",
+     "content": [
+      {
+       "type": "text",
+       "text": "first"
+      }
+     ],
+     "run_id": "local-run-2",
+     "seq_id": 3,
+     "session_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "uuid": "ui-msg-5",
+     "timestamp": "2026-11-28T06:55:51.487Z"
+    },
+    {
+     "type": "message",
+     "id": "ui-msg-5",
+     "date": "2026-11-28T06:55:51.487Z",
+     "agent_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "conversation_id": "local-conv-1",
+     "message_type": "assistant_message",
+     "content": [
+      {
+       "type": "text",
+       "text": " second"
+      }
+     ],
+     "run_id": "local-run-2",
+     "seq_id": 4,
+     "session_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "uuid": "ui-msg-5",
+     "timestamp": "2026-11-28T06:55:51.488Z"
+    },
+    {
+     "type": "message",
+     "id": "letta-msg-8",
+     "date": "2026-11-28T06:55:51.488Z",
+     "agent_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "conversation_id": "local-conv-1",
+     "message_type": "usage_statistics",
+     "step_count": 1,
+     "prompt_tokens": 145,
+     "completion_tokens": 3,
+     "total_tokens": 22932,
+     "cached_input_tokens": 22784,
+     "cache_write_tokens": 0,
+     "reasoning_tokens": 0,
+     "context_tokens": 22932,
+     "run_id": "local-run-2",
+     "seq_id": 5,
+     "session_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "uuid": "letta-msg-8",
+     "timestamp": "2026-11-28T06:55:51.489Z"
+    },
+    {
+     "type": "message",
+     "message_type": "stop_reason",
+     "stop_reason": "end_turn",
+     "run_id": "local-run-2",
+     "seq_id": 6,
+     "session_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "uuid": "658e1a1e-490f-4a65-a771-5f2222162c7d",
+     "timestamp": "2026-11-28T06:55:51.489Z"
+    },
+    {
+     "type": "result",
+     "subtype": "success",
+     "session_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "duration_ms": 5857,
+     "duration_api_ms": 5636,
+     "num_turns": 2,
+     "result": "first second",
+     "agent_id": "agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "conversation_id": "local-conv-1",
+     "run_ids": [],
+     "usage": {
+      "prompt_tokens": 728,
+      "completion_tokens": 59,
+      "total_tokens": 45843,
+      "step_count": 2,
+      "cached_input_tokens": 45056,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "context_tokens": 22932
+     },
+     "uuid": "result-agent-local-c2ab9666-c0c1-4ba2-9422-322f55913376",
+     "timestamp": "2026-11-28T06:55:51.511Z"
+    }
+   ],
+   "aux": [
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "openai/gpt-4.1-mini",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 22855,
+       "output_tokens": 56,
+       "total_tokens": 22911,
+       "cache_read_tokens": 22272,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:45.828Z",
+      "timestamp": "2026-11-28T06:55:47.268Z"
+     },
+     "after": 1
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "openai/gpt-4.1-mini",
+      "status": 503,
+      "outcome": "refused",
+      "started": "2026-11-28T06:55:47.391Z",
+      "timestamp": "2026-11-28T06:55:47.393Z"
+     },
+     "after": 7
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "openai/gpt-4.1-mini",
+      "status": 503,
+      "outcome": "refused",
+      "started": "2026-11-28T06:55:48.403Z",
+      "timestamp": "2026-11-28T06:55:48.405Z"
+     },
+     "after": 8
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "openai/gpt-4.1-mini",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 22929,
+       "output_tokens": 3,
+       "total_tokens": 22932,
+       "cache_read_tokens": 22784,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:50.412Z",
+      "timestamp": "2026-11-28T06:55:51.484Z"
+     },
+     "after": 9
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 45784,
+    "output_tokens": 59,
+    "total_tokens": 45843,
+    "cache_read_tokens": 45056,
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "openai/gpt-4.1-mini",
+      "calls": 2,
+      "input_tokens": 45784,
+      "output_tokens": 59,
+      "cache_read_tokens": 45056,
+      "input_includes_cache": true
+     }
+    ],
+    "provider_details": {
+     "model_calls": 2
+    }
+   }
+  }
+ ]
+}

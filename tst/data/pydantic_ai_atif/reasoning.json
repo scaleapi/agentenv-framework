@@ -1,0 +1,151 @@
+{
+ "scenario": "reasoning",
+ "cli": "2.61.0",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-pydantic-ai-reasoning",
+    "task_id": "ea62c944-60f6-407e-800e-ff88e1f0cfc7",
+    "message_id": "4e0ef81221214926b6d477a6705e69ce",
+    "agent_name": "Pydantic AI",
+    "agent_version": "2.61.0",
+    "agent_model": "anthropic/claude-haiku-4-5",
+    "started_at": "2026-11-28T06:55:01.335722Z",
+    "inbound": [
+     "Think it through, then reply with only the answer: how many positive integers below 1000 are divisible by 3 or 5 but not by 15?"
+    ],
+    "state": "completed",
+    "final": [
+     "I need to find positive integers below 1000 that are divisible by 3 or 5, but not by 15.\n\nLet me think through this:\n\n1. Numbers divisible by 3: ⌊999/3⌋ = 333\n2. Numbers divisible by 5: ⌊999/5⌋ = 199\n3. Numbers divisible by both 3 and 5 (i.e., divisible by 15): ⌊999/15⌋ = 66\n\nUsing inclusion-exclusion:\n- Numbers divisible by 3 OR 5: 333 + 199 - 66 = 466\n\nNow I need to exclude those divisible by 15:\n- Numbers divisible by (3 or 5) but NOT by 15: 466 - 66 = 400\n\n**400**"
+    ],
+    "ended_at": "2026-11-28T06:55:03.422274Z"
+   },
+   "native": [
+    {
+     "parts": [
+      {
+       "content": [
+        "Think it through, then reply with only the answer: how many positive integers below 1000 are divisible by 3 or 5 but not by 15?"
+       ],
+       "timestamp": "2026-11-28T06:55:01.582855Z",
+       "part_kind": "user-prompt"
+      },
+      {
+       "instructions": [
+        {
+         "id": "capability:coder_instructions",
+         "dynamic": false,
+         "content_hash": "a623d0fbe34d037ea313d6edef2804a6c9a49a7eb5d40ee39321553ca002cc40",
+         "part_kind": "instruction-digest"
+        },
+        {
+         "id": "capability:sub_agents",
+         "dynamic": false,
+         "content_hash": "1a01e4b94fc3197bebe8981055a448129712e9be7dfe5f8f26edc841fcc5f433",
+         "part_kind": "instruction-digest"
+        },
+        {
+         "id": "capability:coder_instructions",
+         "dynamic": true,
+         "content_hash": "aa4d848ad03e5f4e6fa6f212568e28df41d60e6f165dfea60c7e233d6a9153cf",
+         "part_kind": "instruction-digest"
+        },
+        {
+         "content": "",
+         "dynamic": true,
+         "on_change": "append",
+         "name": null,
+         "id": "capability:repo_context",
+         "part_kind": "instruction"
+        }
+       ],
+       "part_kind": "instruction-baseline"
+      }
+     ],
+     "timestamp": "2026-11-28T06:55:01.583777Z",
+     "instructions": "You are a software engineering agent. Use tools to investigate, implement, and\nverify the requested work. Read existing code and follow repository instructions\nand conventions. Prefer focused changes that fix causes, not symptoms.\n\nApply DRY, YAGNI, SOLID, and the Zen of Python pragmatically: simple, explicit,\ncohesive code beats abstractions without a present need.\n\nWork autonomously until complete. Ask only for missing requirements, credentials,\nconsequential ambiguity, or approval for irreversible actions. Use reasonable\ndefaults for minor ambiguities. Run focused tests and appropriate lint/type checks;\nreport what you actually verified, assumptions, and remaining limitations.\n\nLeave only the requested change in the project. Check behavior with inline shell\nscripts (e.g. a heredoc) rather than new files, add tests only where the project\nalready has them, and delete any scratch files you created before finishing.\n\nFinish required long-running work before responding: do other useful work, then\npoll status and output until complete or blocked. Servers may remain running once\nreadiness is verified; shut them down when no longer needed.\n\nYou can delegate self-contained tasks to these sub-agents using the `delegate_task` tool. Each runs in its own fresh context and does not see this conversation, so pass everything it needs.\n\nAvailable sub-agents:\n- self: A fresh run of this same agent, with all of your tools, instructions, and capabilities. Use it to hand off a self-contained part of the work.\n\nYour project is `/workspace`. Shell commands start there, and relative file paths resolve from it.",
+     "kind": "request",
+     "run_id": "01a220ef-9388-70dd-8eaf-fb2c966ae5f9",
+     "conversation_id": "01a220ef-9388-70dd-8eaf-fb2d3a4ff00b",
+     "metadata": null,
+     "state": "complete"
+    },
+    {
+     "parts": [
+      {
+       "content": "I need to find positive integers below 1000 that are divisible by 3 or 5, but not by 15.\n\nLet me think through this:\n\n1. Numbers divisible by 3: ⌊999/3⌋ = 333\n2. Numbers divisible by 5: ⌊999/5⌋ = 199\n3. Numbers divisible by both 3 and 5 (i.e., divisible by 15): ⌊999/15⌋ = 66\n\nUsing inclusion-exclusion:\n- Numbers divisible by 3 OR 5: 333 + 199 - 66 = 466\n\nNow I need to exclude those divisible by 15:\n- Numbers divisible by (3 or 5) but NOT by 15: 466 - 66 = 400\n\n**400**",
+       "id": null,
+       "provider_name": null,
+       "provider_details": null,
+       "citations": null,
+       "part_kind": "text"
+      }
+     ],
+     "usage": {
+      "input_tokens": 3929,
+      "cache_write_tokens": 0,
+      "cache_write_1h_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 207,
+      "output_reasoning_tokens": 0,
+      "input_audio_tokens": 0,
+      "cache_audio_read_tokens": 0,
+      "output_audio_tokens": 0,
+      "audio_seconds": 0.0,
+      "details": {
+       "cache_creation_input_tokens": 0,
+       "cache_read_input_tokens": 0,
+       "reasoning_tokens": 0,
+       "text_tokens": 207
+      },
+      "cost": null
+     },
+     "model_name": "claude-haiku-4-5",
+     "timestamp": "2026-11-28T06:55:02.219904Z",
+     "kind": "response",
+     "provider_name": "openai",
+     "provider_url": "https://litellm-proxy.ml.scale.com",
+     "provider_details": {
+      "timestamp": "2026-11-28T06:55:01Z",
+      "service_tier": "standard",
+      "finish_reason": "stop"
+     },
+     "provider_response_id": "chatcmpl-08c0d702",
+     "finish_reason": "stop",
+     "run_id": "01a220ef-9388-70dd-8eaf-fb2c966ae5f9",
+     "conversation_id": "01a220ef-9388-70dd-8eaf-fb2d3a4ff00b",
+     "metadata": null,
+     "workspace_ref": {
+      "provider": "local",
+      "id": "/workspace"
+     },
+     "history_digest": null,
+     "failed_attempts": null,
+     "state": "complete"
+    }
+   ],
+   "aux": [
+    {
+     "name": "turn",
+     "record": {
+      "effort": "high"
+     },
+     "after": 0
+    }
+   ],
+   "usage": {
+    "tool_call_count": 0,
+    "input_tokens": 3929,
+    "output_tokens": 207,
+    "total_tokens": 4136,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "input_includes_cache": true,
+    "provider_details": {
+     "requests": 1
+    }
+   }
+  }
+ ]
+}

@@ -1,0 +1,317 @@
+{
+ "scenario": "retried",
+ "cli": "1.17.18",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-opencode-retried",
+    "task_id": "36e87c71-655e-4e56-a579-2c47371edf8b",
+    "message_id": "1672343d33fb4f11b06b20db897e7e2d",
+    "agent_name": "OpenCode",
+    "agent_version": "1.0.0",
+    "agent_model": "anthropic/claude-haiku-4-5",
+    "started_at": "2026-11-28T06:54:53.227934Z",
+    "inbound": [
+     "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
+    ],
+    "state": "completed",
+    "final": [
+     "I'll run those two commands for you.\nBoth outputs on one line: `first` and `second`"
+    ],
+    "ended_at": "2026-11-28T06:55:03.318807Z"
+   },
+   "native": [
+    {
+     "type": "step_start",
+     "timestamp": 1795848902422,
+     "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+     "part": {
+      "id": "prt_220ef96ed0014a7OD50UEjWMDV",
+      "messageID": "msg_220ef78e8001K8ef7HQbIHqthQ",
+      "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+      "type": "step-start"
+     }
+    },
+    {
+     "type": "text",
+     "timestamp": 1795848902422,
+     "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+     "part": {
+      "id": "prt_220ef96f1001yjXyZeAioVAgAp",
+      "messageID": "msg_220ef78e8001K8ef7HQbIHqthQ",
+      "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+      "type": "text",
+      "text": "I'll run those two commands for you.",
+      "time": {
+       "start": 1795848902385,
+       "end": 1795848902416
+      }
+     }
+    },
+    {
+     "type": "tool_use",
+     "timestamp": 1795848902509,
+     "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+     "part": {
+      "type": "tool",
+      "tool": "bash",
+      "callID": "toolu_vrtx_01Xq2dWUDsUJzoqwUmNzEnm7",
+      "state": {
+       "status": "completed",
+       "input": {
+        "command": "echo first"
+       },
+       "output": "first\n",
+       "metadata": {
+        "output": "first\n",
+        "exit": 0,
+        "truncated": false
+       },
+       "title": "echo first",
+       "time": {
+        "start": 1795848902478,
+        "end": 1795848902483
+       }
+      },
+      "id": "prt_220ef96f50019aM6GeKeilafob",
+      "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+      "messageID": "msg_220ef78e8001K8ef7HQbIHqthQ"
+     }
+    },
+    {
+     "type": "tool_use",
+     "timestamp": 1795848902509,
+     "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+     "part": {
+      "type": "tool",
+      "tool": "bash",
+      "callID": "toolu_vrtx_01Ek6CjGWEeotHYsq123VH2T",
+      "state": {
+       "status": "completed",
+       "input": {
+        "command": "echo second"
+       },
+       "output": "second\n",
+       "metadata": {
+        "output": "second\n",
+        "exit": 0,
+        "truncated": false
+       },
+       "title": "echo second",
+       "time": {
+        "start": 1795848902485,
+        "end": 1795848902488
+       }
+      },
+      "id": "prt_220ef9702001WmCDsjqAtQGHlH",
+      "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+      "messageID": "msg_220ef78e8001K8ef7HQbIHqthQ"
+     }
+    },
+    {
+     "type": "step_finish",
+     "timestamp": 1795848902509,
+     "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+     "part": {
+      "id": "prt_220ef975b0011mX1k4vxkzShNQ",
+      "reason": "tool-calls",
+      "messageID": "msg_220ef78e8001K8ef7HQbIHqthQ",
+      "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+      "type": "step-finish",
+      "tokens": {
+       "total": 9436,
+       "input": 9339,
+       "output": 97,
+       "reasoning": 0,
+       "cache": {
+        "write": 0,
+        "read": 0
+       }
+      },
+      "cost": 0
+     }
+    },
+    {
+     "type": "step_start",
+     "timestamp": 1795848903230,
+     "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+     "part": {
+      "id": "prt_220ef9a2a001SAVcq8IcbvWeud",
+      "messageID": "msg_220ef9762001iiDvPQLFVKNz9W",
+      "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+      "type": "step-start"
+     }
+    },
+    {
+     "type": "text",
+     "timestamp": 1795848903230,
+     "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+     "part": {
+      "id": "prt_220ef9a2d001f5xv4NnC2HCIU9",
+      "messageID": "msg_220ef9762001iiDvPQLFVKNz9W",
+      "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+      "type": "text",
+      "text": "Both outputs on one line: `first` and `second`",
+      "time": {
+       "start": 1795848903213,
+       "end": 1795848903217
+      }
+     }
+    },
+    {
+     "type": "step_finish",
+     "timestamp": 1795848903230,
+     "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+     "part": {
+      "id": "prt_220ef9a33001KZBB3sFQz1Cb8s",
+      "reason": "stop",
+      "messageID": "msg_220ef9762001iiDvPQLFVKNz9W",
+      "sessionID": "ses_ddf1088faffe4J9yNH08vD1Rd1",
+      "type": "step-finish",
+      "tokens": {
+       "total": 9515,
+       "input": 163,
+       "output": 16,
+       "reasoning": 0,
+       "cache": {
+        "write": 0,
+        "read": 9336
+       }
+      },
+      "cost": 0
+     }
+    }
+   ],
+   "aux": [
+    {
+     "name": "turn",
+     "record": {
+      "type": "agentenv.turn",
+      "model": "anthropic/claude-haiku-4-5",
+      "effort": null
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 503,
+      "outcome": "refused",
+      "started": "2026-11-28T06:54:55.132Z",
+      "timestamp": "2026-11-28T06:54:55.134Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 594,
+       "output_tokens": 7,
+       "total_tokens": 601,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 0,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:54:54.740Z",
+      "timestamp": "2026-11-28T06:54:55.354Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 503,
+      "outcome": "refused",
+      "started": "2026-11-28T06:54:57.260Z",
+      "timestamp": "2026-11-28T06:54:57.263Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 9339,
+       "output_tokens": 97,
+       "total_tokens": 9436,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 9336,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:01.276Z",
+      "timestamp": "2026-11-28T06:55:02.378Z"
+     },
+     "after": 0
+    },
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "anthropic/claude-haiku-4-5",
+      "status": 200,
+      "outcome": "answered",
+      "usage": {
+       "input_tokens": 9499,
+       "output_tokens": 16,
+       "total_tokens": 9515,
+       "cache_read_tokens": 9336,
+       "cache_write_tokens": 156,
+       "input_includes_cache": true
+      },
+      "started": "2026-11-28T06:55:02.521Z",
+      "timestamp": "2026-11-28T06:55:03.200Z"
+     },
+     "after": 5
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 19432,
+    "output_tokens": 120,
+    "total_tokens": 19552,
+    "cache_read_tokens": 9336,
+    "cache_write_tokens": 9492,
+    "cache_write_ttl_tokens": {
+     "5m": 9492
+    },
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "anthropic/claude-haiku-4-5",
+      "calls": 3,
+      "input_tokens": 19432,
+      "output_tokens": 120,
+      "cache_read_tokens": 9336,
+      "cache_write_tokens": 9492,
+      "input_includes_cache": true,
+      "cache_write_ttl_tokens": {
+       "5m": 9492
+      }
+     }
+    ],
+    "provider_details": {
+     "model_calls": 3
+    }
+   }
+  }
+ ]
+}

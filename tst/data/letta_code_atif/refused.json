@@ -1,0 +1,147 @@
+{
+ "scenario": "refused",
+ "cli": "0.34.26",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-letta-code-refused",
+    "task_id": "37d7354a-f58d-49c3-844e-b5c029c090d4",
+    "message_id": "f0dbd97483d143a896e0e1796416fc1b",
+    "agent_name": "Letta Code",
+    "agent_version": "1.0.0",
+    "agent_model": "openai/gpt-4.1-mini",
+    "started_at": "2026-11-28T06:55:19.516902Z",
+    "inbound": [
+     "Reply with ok."
+    ],
+    "state": "failed",
+    "final": [
+     "Letta Code exited 1 without completing\n"
+    ],
+    "ended_at": "2026-11-28T06:55:24.468278Z",
+    "data": [
+     {
+      "data": {
+       "error_type": "cli_error",
+       "error_message": "Letta Code exited 1 without completing\n"
+      }
+     }
+    ],
+    "error": {
+     "kind": "agent_error",
+     "message": "Letta Code exited 1 without completing\n",
+     "code": "letta_code_cli_error"
+    }
+   },
+   "native": [
+    {
+     "type": "system",
+     "subtype": "init",
+     "session_id": "agent-local-871276c3-80a7-480b-9ce2-4e5012d6ade3",
+     "agent_id": "agent-local-871276c3-80a7-480b-9ce2-4e5012d6ade3",
+     "conversation_id": "local-conv-1",
+     "model": "openai-compatible/openai/gpt-4.1-mini",
+     "tools": [
+      "Bash",
+      "Monitor",
+      "WatchPR",
+      "Wake",
+      "EnterWorktree",
+      "ExitWorktree",
+      "SetWorkingDirectory",
+      "Edit",
+      "TaskStop",
+      "Read",
+      "Skill",
+      "Memory",
+      "CodeMode",
+      "Workflow",
+      "Agent",
+      "SendAgentMessage",
+      "TaskCreate",
+      "TaskGet",
+      "TaskList",
+      "TaskUpdate",
+      "Write",
+      "mcp__peer_agents__peer_list",
+      "mcp__peer_agents__peer_get_card",
+      "mcp__peer_agents__peer_send_message",
+      "mcp__peer_agents__peer_start_task",
+      "mcp__peer_agents__peer_get_task",
+      "mcp__peer_agents__peer_cancel_task"
+     ],
+     "cwd": "/app",
+     "mcp_servers": [],
+     "permission_mode": "",
+     "slash_commands": [],
+     "memfs_enabled": true,
+     "skill_sources": [
+      "bundled",
+      "global",
+      "agent",
+      "project"
+     ],
+     "system_info_reminder_enabled": true,
+     "reflection_trigger": "step-count",
+     "reflection_step_count": 25,
+     "uuid": "init-agent-local-871276c3-80a7-480b-9ce2-4e5012d6ade3",
+     "timestamp": "2026-11-28T06:55:23.509Z"
+    },
+    {
+     "type": "error",
+     "message": "400: {\"message\":\"refused by the recording proxy\",\"code\":400}",
+     "stop_reason": "error",
+     "run_id": "local-run-1",
+     "session_id": "agent-local-871276c3-80a7-480b-9ce2-4e5012d6ade3",
+     "uuid": "9a2483db-02c9-4a73-8261-8a9d3106dd72",
+     "api_error": {
+      "message_type": "error_message",
+      "message": "400: {\"message\":\"refused by the recording proxy\",\"code\":400}",
+      "error_type": "local_backend_error",
+      "detail": "400: {\"message\":\"refused by the recording proxy\",\"code\":400}",
+      "run_id": "local-run-1"
+     },
+     "timestamp": "2026-11-28T06:55:23.849Z"
+    },
+    {
+     "type": "message",
+     "message_type": "stop_reason",
+     "stop_reason": "error",
+     "run_id": "local-run-1",
+     "seq_id": 2,
+     "session_id": "agent-local-871276c3-80a7-480b-9ce2-4e5012d6ade3",
+     "uuid": "2360c6b1-5e81-43ce-af32-6edde2b43d80",
+     "timestamp": "2026-11-28T06:55:23.859Z"
+    },
+    {
+     "type": "error",
+     "message": "{\n  \"error\": {\n    \"error\": {\n      \"message\": \"400: {\\\"message\\\":\\\"refused by the recording proxy\\\",\\\"code\\\":400}\",\n      \"detail\": \"400: {\\\"message\\\":\\\"refused by the recording proxy\\\",\\\"code\\\":400}\",\n      \"error_type\": \"local_backend_error\",\n      \"retryable\": false,\n      \"run_id\": \"local-run-1\"\n    },\n    \"run_id\": \"local-run-1\"\n  }\n}",
+     "stop_reason": "error",
+     "run_id": "local-run-1",
+     "session_id": "agent-local-871276c3-80a7-480b-9ce2-4e5012d6ade3",
+     "uuid": "error-local-run-1",
+     "timestamp": "2026-11-28T06:55:23.862Z"
+    }
+   ],
+   "aux": [
+    {
+     "name": "calls",
+     "record": {
+      "type": "agentenv.model_call",
+      "via": "relay",
+      "model": "openai/gpt-4.1-mini",
+      "status": 400,
+      "outcome": "refused",
+      "started": "2026-11-28T06:55:23.823Z",
+      "timestamp": "2026-11-28T06:55:23.844Z"
+     },
+     "after": 1
+    }
+   ],
+   "usage": {
+    "tool_call_count": 0
+   }
+  }
+ ]
+}
