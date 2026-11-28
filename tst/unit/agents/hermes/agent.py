@@ -10,6 +10,8 @@ import agent_env
 
 AGENT_DIR = Path(agent_env.__file__).parent / "agents" / "agents" / "hermes"
 sys.path.insert(0, str(AGENT_DIR))
+agentenv_plugin = importlib.import_module("agentenv_plugin")
+hermes_atif = importlib.import_module("hermes_atif")
 hermes_bridge = importlib.import_module("hermes_bridge")
 hermes_kit = importlib.import_module("hermes_kit")
 # By its path: another agent's a2a_server, imported by the same name, may be loaded already.

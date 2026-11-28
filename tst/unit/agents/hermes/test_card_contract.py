@@ -32,13 +32,20 @@ def test_the_extensions_are_the_wrappers(hermes):
     assert _methods(hermes.card) == {
         "urn:agentenv:agent-config/v1": ["get", "set"],
         "urn:agentenv:mcp-config/v1": ["add", "list"],
-        "urn:agentenv:trajectory/v1": ["get"],
+        "urn:agentenv:trajectory/v1": ["get", "media", "prescribe"],
         "urn:agentenv:attribution-probe/v1": ["probe"],
         "urn:agentenv:peer-agents/v1": ["list", "set"],
         "urn:agentenv:skill-config/v1": ["add", "list"],
         "urn:agentenv:snapshot/v1": ["load", "save"],
         "urn:agentenv:staging/v1": [],
     }
+
+
+def test_the_card_offers_atif_beside_the_hook_events_which_stay_the_default(hermes):
+    (trajectory,) = [ext for ext in hermes.card["capabilities"]["extensions"]
+                     if ext["uri"] == "urn:agentenv:trajectory/v1"]
+    assert trajectory["params"]["formats"] == ["hermes-hook-events/1", "atif/1"]
+    assert trajectory["params"]["native"] == trajectory["params"]["default"] == "hermes-hook-events/1"
 
 
 @pytest.mark.asyncio

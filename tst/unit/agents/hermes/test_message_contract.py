@@ -347,6 +347,45 @@ def test_calls_that_reported_counts_are_kept_beside_those_that_reported_none():
         "provider_details": {"api_calls": 4, "unreported_calls": 2, "cost_status": "estimated"}}
 
 
+def _aux(turn, session, prompt, output, error=None):
+    event = {"type": "post_auxiliary_call", "turn_id": turn, "session_id": session, "aux_task": "vision",
+             "model": "claude-haiku-4-5"}
+    if error is None:
+        event["usage"] = {"input_tokens": prompt, "prompt_tokens": prompt, "output_tokens": output,
+                          "cache_read_tokens": 0, "cache_write_tokens": 0}
+    else:
+        event["error"] = error
+    return event
+
+
+def test_a_childs_auxiliary_calls_are_counted_beside_its_main_ones_and_the_turns_own_are_left_to_the_usage_file():
+    """Hermes bills an auxiliary call to the session it ran in: the usage file counts the turn's own, title and
+    compression, and leaves out a child's, such as its vision call; a failed attempt reported no counts."""
+    parser = _events(_aux("A", "parent", 288, 10), _call("A", "parent", 13081, 82), _aux("", "parent", 300, 5),
+                     _call("B", "child", 9161, 60), _aux("B", "child", 500, 8), _aux("B", "child", 0, 0, "Timeout"),
+                     _call("A", "parent", 13535, 4))
+    report = {"input_tokens": 26616, "output_tokens": 86, "total_tokens": 26702, "cache_read_tokens": 0,
+              "cache_write_tokens": 0, "api_calls": 2, "cost_status": "unknown",
+              "auxiliary": {"api_calls": 2, "input_tokens": 588, "output_tokens": 15, "cache_read_tokens": 0,
+                            "cache_write_tokens": 0, "total_tokens": 603},
+              "total_including_auxiliary": {"api_calls": 4}}
+
+    usage = a2a_server._usage(parser.result(b"", b"", 0, report))
+
+    assert (parser.side_calls.calls, parser.all_calls.calls) == (2, 6)
+    assert (usage.input_tokens, usage.output_tokens, usage.provider_details["api_calls"]) == (
+        26616 + 588 + 9161 + 500, 86 + 15 + 60 + 8, 6)
+
+
+def test_a_killed_turns_auxiliary_calls_are_among_the_calls_it_made():
+    parser = _events(_aux("A", "s", 288, 10), _call("A", "s", 13073, 53))
+
+    usage = a2a_server._usage(result(usage={}, killed_calls=parser.all_calls))
+
+    assert (usage.input_tokens, usage.output_tokens) == (288 + 13073, 10 + 53)
+    assert usage.provider_details == {"api_calls": 2, "unreported_calls": 1}
+
+
 def test_a_killed_turn_keeps_the_calls_it_made_as_a_lower_bound():
     """hermes-timeout-claude, recorded on 2026-11-20: two calls (13,073 and 13,156 in, 53 and 81 out) before the turn
     ran out of time, killed before it wrote its usage file."""

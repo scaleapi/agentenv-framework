@@ -38,15 +38,15 @@ the model no one is there to answer.
 | `agent-config/v1` | `HermesConfig`: `model`, `effort` (Hermes' `--reasoning`), `system_prompt`, `output_format` (a JSON schema the answer is checked against), `project_id`, `task_id`, `timeout_seconds` (1800 by default), `web_tools` (`false` turns off Hermes' `web`, `search`, `browser` and `x_search` toolsets with `agent.disabled_toolsets`) |
 | `mcp-config/v1` | SDK default; each server written to the turn's profile config |
 | `skill-config/v1` | inline and bundle skills installed under `$HERMES_ROOT/agentenv-skills/<name>/`, which every profile reads as `skills.external_dirs` |
-| `trajectory/v1` | the turn's Hermes plugin hook events (`on_session_start`, `pre_tool_call`, `post_tool_call`, `post_api_request` with each model response, its tool calls and usage, `api_request_error`, `post_llm_call`, `on_session_end`), live while it runs (format `hermes-hook-events/1`) |
+| `trajectory/v1` | the turn's Hermes plugin hook events (`on_session_start`, `pre_tool_call`, `post_tool_call`, `post_api_request` with each model call's start, usage and assistant message whole, `api_request_error`, `post_auxiliary_call` for each title, compression or vision call, `subagent_start`, `subagent_stop`, `post_compaction`, `post_llm_call`, `on_session_end`), live while it runs (format `hermes-hook-events/1`); `atif/1` too when the run prescribes it, built from them by `hermes_atif.py` with the turn's effort and Hermes' cost as `turn` aux records: a step per model call, auxiliary ones included, each `delegate_task` child a sub-agent |
 | `snapshot/v1` | `save` archives the context's profile (its sessions database, memory and `SOUL.md`; not the config, caches or logs Hermes rebuilds) with its session id, and `/app`, once no task runs; `load` restores the profile into the target context and replaces `/app`'s contents, both or neither, so a failed load leaves the context's profile, session and workspace as they were. No changelog |
 | `peer-agents/v1` | SDK default: Hermes reaches the task's other agents through the SDK's `peer_agents` MCP tools |
 | `attribution-probe/v1` | the `project_id` and `task_id` the last turn sent |
 
 A turn's usage counts every model call the turn made: its main calls and its auxiliary ones (title generation,
-compression), as Hermes' usage file reports them, and a `delegate_task` child's, from their `post_api_request` events,
-which the file leaves out. A turn killed before it wrote the file keeps the calls its events counted, marked as a lower
-bound. The turn's counts are its model's (`Usage.models`): Hermes runs its auxiliary tasks on the main model and a
+compression), as Hermes' usage file reports them, and a `delegate_task` child's, main and auxiliary, which the file
+leaves out, from their `post_api_request` and `post_auxiliary_call` events. A turn killed before it wrote the file keeps the calls its events
+counted, auxiliary ones included, marked as a lower bound. The turn's counts are its model's (`Usage.models`): Hermes runs its auxiliary tasks on the main model and a
 child inherits it, as the profile pins no other, so a turn whose calls named several models gives no breakdown. Hermes'
 estimated cost is kept only where it priced the calls. The profile turns Hermes' background review off:
 its fork outlives the turn's process, which kills it before it reports what the proxy billed. The image is `python:3.11-slim` with Hermes, `pdftoppm` and the agent, running
