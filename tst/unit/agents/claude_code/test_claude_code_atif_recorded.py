@@ -12,7 +12,6 @@ with ``tst/manual/claude_code_atif/record.py``, whose docstring has the steps.""
 from __future__ import annotations
 
 import json
-import math
 import sys
 from pathlib import Path
 
@@ -22,7 +21,7 @@ REPO = Path(__file__).resolve().parents[4]
 if __name__ == "__main__":
     sys.path.insert(0, str(REPO))
 
-from agentenv_protocol.atif import RecordedTask, check_adapter, check_media, task_document, tasks  # noqa: E402
+from agentenv_protocol.atif import check_adapter, check_media, task_document, tasks  # noqa: E402
 
 from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (  # noqa: E402
     compact_atif_trajectory,
@@ -36,36 +35,15 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import (  
     turn_events,
 )
 from tst.unit.agents.claude_code.agent import claude_code_atif  # noqa: E402
+from tst.util.atif_recorded import (  # noqa: E402
+    Recordings,
+    assert_every_model_call_has_its_time_and_usage,
+    assert_steps_sum_to_reported_usage,
+    trajectories,
+)
 
 FIXTURES = REPO / "tst" / "data" / "claude_code_atif"
-SCENARIOS = sorted(path.stem for path in FIXTURES.glob("*.json") if not path.name.endswith(".expected.json"))
 ClaudeCodeAtif = claude_code_atif.ClaudeCodeAtif
-
-
-def _shared(marker: dict) -> list:
-    return json.loads((FIXTURES / marker["shared"]).read_text())
-
-
-def recorded(scenario: str) -> tuple[list[RecordedTask], list[dict | None]]:
-    data = json.loads((FIXTURES / f"{scenario}.json").read_text())
-    tasks, usage = [], []
-    for turn in data["turns"]:
-        aux = [{**entry, "record": {**entry["record"], "tools": _shared(entry["record"]["tools"])}}
-               if entry["name"] == "tools" else entry for entry in turn["aux"]]
-        tasks.append(RecordedTask.from_served(turn["turn"], turn["native"], aux))
-        usage.append(turn["usage"])
-    return tasks, usage
-
-
-def compacted_turns(scenario: str) -> set[int]:
-    """The turns whose native stdout compacts the conversation (a ``compact_boundary``)."""
-    data = json.loads((FIXTURES / f"{scenario}.json").read_text())
-    return {index for index, turn in enumerate(data["turns"])
-            if any(item.get("subtype") == "compact_boundary" for item in turn["native"] if isinstance(item, dict))}
-
-
-def _trajectories(document: dict) -> list[dict]:
-    return [document, *(document.get("subagent_trajectories") or [])]
 
 
 def _tool_files() -> dict[str, list]:
@@ -73,50 +51,61 @@ def _tool_files() -> dict[str, list]:
             for path in sorted((FIXTURES / "tools").glob("*.json"))}
 
 
-def expected(scenario: str) -> dict:
+def _fed(entry: dict) -> dict:
+    """An aux entry as the agent fed it, a request shape's tools read back from the shared file it names."""
+    if entry["name"] != "tools":
+        return entry
+    tools = json.loads((FIXTURES / entry["record"]["tools"]["shared"]).read_text())
+    return {**entry, "record": {**entry["record"], "tools": tools}}
+
+
+def _read_back(document: dict) -> dict:
     """The checked-in document, each agent block's tool definitions read back from the shared file it names."""
-    document = json.loads((FIXTURES / f"{scenario}.expected.json").read_text())
     files = _tool_files()
-    for trajectory in _trajectories(document):
+    for trajectory in trajectories(document):
         named = trajectory["agent"].get("tool_definitions")
         if isinstance(named, dict):
             trajectory["agent"]["tool_definitions"] = files[named["shared"]]
     return document
 
 
-def replay(scenario: str):
-    tasks, _ = recorded(scenario)
-    return check_adapter(ClaudeCodeAtif, tasks)
+def _named(document: dict) -> dict:
+    """A replay's document as it's checked in, each agent block's tool definitions named by their shared file."""
+    files = _tool_files()
+    for trajectory in trajectories(document):
+        definitions = trajectory["agent"].get("tool_definitions")
+        named = next((name for name, converted in files.items() if converted == definitions), None)
+        if named is not None:
+            trajectory["agent"]["tool_definitions"] = {"shared": named}
+    return document
+
+
+RECORDINGS = Recordings(FIXTURES, ClaudeCodeAtif, aux=_fed, expected=_read_back, saved=_named)
+SCENARIOS = RECORDINGS.scenarios
+recorded, replay = RECORDINGS.recorded, RECORDINGS.replay
+
+
+def compacted_turns(scenario: str) -> set[int]:
+    """The turns whose native stdout compacts the conversation (a ``compact_boundary``)."""
+    return {index for index, turn in enumerate(RECORDINGS.data(scenario)["turns"])
+            if any(item.get("subtype") == "compact_boundary" for item in turn["native"] if isinstance(item, dict))}
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_a_recorded_run_replays_to_its_document_under_the_live_rule(scenario):
-    tasks, _ = recorded(scenario)
-    kit = check_adapter(ClaudeCodeAtif, tasks, expected=expected(scenario))
-    kit.raise_for_errors()
+    RECORDINGS.check(scenario)
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_a_recorded_runs_steps_sum_to_the_usage_each_turn_reported(scenario):
     """The copy's totals are the turns' reported usage, a turn that compacts the conversation's included: the step of
     the call that wrote its summary carries what the turn reported beyond its other steps."""
-    _, usage = recorded(scenario)
-    final = replay(scenario).document["final_metrics"]
-    reported = [turn or {} for turn in usage]
-    for metric, field in (("total_prompt_tokens", "input_tokens"), ("total_completion_tokens", "output_tokens"),
-                          ("total_cached_tokens", "cache_read_tokens")):
-        total = sum(turn.get(field) or 0 for turn in reported)
-        assert final.get(metric, 0) == total, (metric, final.get(metric), total)
-    if all(turn.get("cost_usd") is not None for turn in reported):
-        assert math.isclose(final["total_cost_usd"], sum(turn["cost_usd"] for turn in reported))
+    assert_steps_sum_to_reported_usage(replay(scenario).document, recorded(scenario)[1])
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_every_model_call_of_a_recorded_run_is_a_step_with_its_transcripts_time_and_usage(scenario):
-    for trajectory in _trajectories(replay(scenario).document):
-        for step in trajectory["steps"]:
-            if step["source"] == "agent" and step.get("llm_call_count") != 0:
-                assert step.get("timestamp") and "completion_tokens" in step.get("metrics", {}), step["step_id"]
+    assert_every_model_call_has_its_time_and_usage(replay(scenario).document)
 
 
 def test_the_recordings_cover_what_the_adapter_maps():
@@ -141,7 +130,7 @@ def test_a_judge_reads_each_recorded_turn_with_its_calls_results_answer_and_scre
     kit = replay(scenario)
     for task in tasks(kit.document):
         view = task_document(kit.document, [task.task_id])
-        steps = [step for trajectory in _trajectories(view) for step in trajectory["steps"] if step["source"] == "agent"]
+        steps = [step for trajectory in trajectories(view) for step in trajectory["steps"] if step["source"] == "agent"]
         results = [result for step in steps for result in (step.get("observation") or {}).get("results") or ()]
         images = [part for result in results for part in result.get("content") or ()
                   if isinstance(part, dict) and part.get("type") == "image"]
@@ -216,17 +205,5 @@ def test_from_atif_reads_harbors_own_conversion_of_a_recorded_session():
     assert ClaudeCodeAtif.from_atif(harbor).log
 
 
-def _regenerate() -> None:
-    files = _tool_files()
-    for scenario in SCENARIOS:
-        document = replay(scenario).document
-        for trajectory in _trajectories(document):
-            definitions = trajectory["agent"].get("tool_definitions")
-            named = next((name for name, converted in files.items() if converted == definitions), None)
-            if named is not None:
-                trajectory["agent"]["tool_definitions"] = {"shared": named}
-        (FIXTURES / f"{scenario}.expected.json").write_text(json.dumps(document, indent=1, ensure_ascii=False) + "\n")
-
-
 if __name__ == "__main__":
-    _regenerate()
+    RECORDINGS.regenerate()

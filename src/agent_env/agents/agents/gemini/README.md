@@ -44,7 +44,7 @@ bound. Through a LiteLLM proxy, a provider-prefixed model's chat completions don
 | `snapshot/v1` changelog | where the host has GNU tar: an AfterTool hook captures each tool call's writes as an incremental tar uploaded through the namespace grant; `apply` replays them in order and, with `resume_conversation`, binds the last applied tool call's session |
 | `peer-agents/v1` | SDK default: the CLI reaches the task's other agents through the SDK's `peer_agents` MCP tools |
 | `attribution-probe/v1` | the `project_id` and `task_id` the proxy last sent |
-| `install/v1` | `install.sh`, into a task container (as root, the CLI working in `/workspace`) or onto a `vm` sandbox's Linux host: Node and uv checked against their checksums, the CLI from `package-lock.json` and the agent's requirements in a Python of its own, which the target's own Node and Python are never replaced by; the model's commands get the agent's where the target has none. Node's builds need glibc |
+| `install/v1` | `install.sh`, into a task container (as root, the CLI working in `/workspace`) or onto a `vm` sandbox's Linux host (the CLI working in `/app`): Node and uv checked against their checksums, the CLI from `package-lock.json` and the agent's requirements in a Python of its own, which the target's own Node and Python are never replaced by; the model's commands get the agent's where the target has none. Node's builds need glibc |
 | `triggers/v1` | SDK default |
 
 The image is `python:3.11-slim` with Node, the CLI, the agent and the Python packages `model-requirements.txt` pins for

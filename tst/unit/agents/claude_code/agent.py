@@ -1,5 +1,6 @@
 """The Claude Code agent's modules, imported as its image runs them: by their own names, from its folder and from the
-folders its build context takes as agent_clock/ and clock/, whose modules the image copies beside the bridge."""
+folders its build context takes as agent_clock/, clock/ and tail_follow/, whose modules the image copies beside the
+bridge."""
 
 import importlib
 import os
@@ -11,7 +12,7 @@ from tst.util.build_context import sent
 
 AGENT_DIR = Path(agent_env.__file__).parent / "agents" / "agents" / "claude-code"
 IMPORTED = [str(AGENT_DIR), str(sent(AGENT_DIR, "agent_clock/agent_egress.py").parent),
-            str(sent(AGENT_DIR, "clock/clockpage.py").parent)]
+            str(sent(AGENT_DIR, "clock/clockpage.py").parent), str(sent(AGENT_DIR, "tail_follow/tail_follow.py").parent)]
 PYTHONPATH = os.pathsep.join(IMPORTED)
 sys.path[:0] = IMPORTED
 a2a_server = importlib.import_module("a2a_server")

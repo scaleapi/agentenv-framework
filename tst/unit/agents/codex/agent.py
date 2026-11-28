@@ -1,5 +1,6 @@
 """The Codex agent's modules, imported as its image runs them: by their own names, from its folder and from the folders
-its build context takes as agent_clock/, clock/ and model_relay/, whose modules the image copies beside the bridge."""
+its build context takes as agent_clock/, clock/, model_relay/ and tail_follow/, whose modules the image copies beside the
+bridge."""
 
 import importlib
 import importlib.util
@@ -12,11 +13,13 @@ from tst.util.build_context import sent
 
 AGENT_DIR = Path(agent_env.__file__).parent / "agents" / "agents" / "codex"
 IMPORTED = [str(AGENT_DIR), str(sent(AGENT_DIR, "agent_clock/agent_egress.py").parent),
-            str(sent(AGENT_DIR, "clock/clockpage.py").parent), str(sent(AGENT_DIR, "model_relay/model_relay.py").parent)]
+            str(sent(AGENT_DIR, "clock/clockpage.py").parent), str(sent(AGENT_DIR, "model_relay/model_relay.py").parent),
+            str(sent(AGENT_DIR, "tail_follow/tail_follow.py").parent)]
 PYTHONPATH = os.pathsep.join(IMPORTED)
 sys.path[:0] = IMPORTED
 codex_atif = importlib.import_module("codex_atif")
 codex_bridge = importlib.import_module("codex_bridge")
+codex_rollout = importlib.import_module("codex_rollout")
 codex_config = importlib.import_module("codex_config")
 codex_date = importlib.import_module("codex_date")
 codex_kit = importlib.import_module("codex_kit")

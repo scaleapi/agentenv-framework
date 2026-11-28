@@ -19,28 +19,24 @@ The key is never written: every text is masked, and a copied file holding it is 
 writes the fixtures, and running the recorded test as a script writes the expected documents. Note the CLI version in
 the adapter's ``TESTED_WITH``."""
 import argparse
-import json
 import os
-import platform
 import shutil
-import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
-import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO))
+
+from tst.manual.atif_recording import SECRET, build, http, mask, run, save, start, turn  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
-SECRET = os.environ.get("LITELLM_API_KEY", "")
 NETWORK = "atif-recording"
 BROWSER = "atif-recording-playwright"
 FAULTS = "atif-recording-faults"
 PLAYWRIGHT_MCP = ("mcr.microsoft.com/playwright/mcp:v0.0.86"
                   "@sha256:2dfc17e08e8db54678ec965ce9ffb4100be0aa68135774d761bac9035ceb6668")
 FAULT_PORTS = {"refuse": 18601, "resume": 18602, "retry": 18603}
-TERMINAL = {"completed", "failed", "canceled", "rejected", "input-required", "auth-required"}
 AGENTS = {
     "codex": {"image": "agentenv-codex", "model": "gpt-5.5", "files": "/home/agent/.codex/sessions",
               "version": ["codex", "--version"]},
@@ -72,54 +68,6 @@ SCENARIOS = {
 }
 
 
-def mask(text: str) -> str:
-    return text.replace(SECRET, "***") if SECRET else text
-
-
-def run(command: list[str], **kw) -> subprocess.CompletedProcess:
-    done = subprocess.run(command, capture_output=True, text=True, **kw)
-    done.stdout, done.stderr = mask(done.stdout), mask(done.stderr)
-    return done
-
-
-def http(method: str, url: str, body=None, timeout: float = 60):
-    data = json.dumps(body).encode() if body is not None else None
-    request = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, json.loads(response.read() or b"null")
-    except urllib.error.HTTPError as exc:
-        raw = exc.read()
-        try:
-            return exc.code, json.loads(raw or b"null")
-        except ValueError:
-            return exc.code, mask(raw.decode(errors="replace"))[:300]
-    except (urllib.error.URLError, OSError) as exc:
-        return 0, str(exc)
-
-
-def save(path: Path, value) -> None:
-    path.write_text(mask(json.dumps(value, indent=1, ensure_ascii=False)))
-
-
-def build(image_name: str) -> str:
-    """The agent's image, built from this checkout for this machine's architecture."""
-    planned = run([sys.executable, ".github/scripts/infra_images.py", "plan", "--only", "agents"], cwd=REPO)
-    entry = next(e for e in json.loads(planned.stdout) if e["name"] == image_name)
-    arch = "arm64" if platform.machine() in ("arm64", "aarch64") else "amd64"
-    env = {**os.environ, "GITHUB_REPOSITORY": "scaleapi/agentenv-framework", "GITHUB_SHA": "recording"}
-    built = run([sys.executable, ".github/scripts/infra_build.py", "build", json.dumps(entry), arch], cwd=REPO, env=env)
-    if built.returncode != 0:
-        raise SystemExit(f"the image didn't build:\n{built.stdout[-3000:]}\n{built.stderr[-3000:]}")
-    return f"{entry['repository']}:{entry['tag']}-{arch}"
-
-
-def start(command: list[str]) -> None:
-    started = run(command)
-    if started.returncode != 0:
-        raise RuntimeError(started.stderr[-500:])
-
-
 def fault(agent: str, scenario: dict) -> str | None:
     faults = scenario.get("faults")
     return faults.get(agent) if isinstance(faults, dict) else faults
@@ -137,26 +85,6 @@ def start_agent(agent: str, image: str, name: str, scenario: dict) -> str:
             return base
         time.sleep(1)
     raise RuntimeError(f"no card: {run(['docker', 'logs', '--tail', '40', name]).stdout[-2000:]}")
-
-
-def turn(base: str, context_id: str, prompt: str) -> tuple[str, dict, list]:
-    message = {"messageId": uuid.uuid4().hex, "role": "user", "contextId": context_id,
-               "parts": [{"kind": "text", "text": prompt}]}
-    status, sent = http("POST", f"{base}/a2a", {"jsonrpc": "2.0", "id": "1", "method": "message/send",
-                                                "params": {"message": message, "configuration": {"blocking": False}}})
-    if status != 200 or "error" in (sent or {}):
-        raise RuntimeError(f"message/send {status} {sent}")
-    task_id, pages, deadline = sent["result"]["id"], [], time.time() + 900
-    while time.time() < deadline:
-        status, page = http("POST", f"{base}/ext/trajectory", {"task_id": task_id, "format": "atif/1", "after": 0})
-        if status == 200:
-            pages.append(page)
-        status, polled = http("POST", f"{base}/a2a", {"jsonrpc": "2.0", "id": "p", "method": "tasks/get",
-                                                      "params": {"id": task_id}})
-        if status == 200 and "result" in polled and polled["result"]["status"]["state"] in TERMINAL:
-            return task_id, polled["result"], pages
-        time.sleep(1.0)
-    raise RuntimeError("the turn didn't end in 15 minutes")
 
 
 def record(agent: str, image: str, name: str, scenario: dict, out: Path) -> None:

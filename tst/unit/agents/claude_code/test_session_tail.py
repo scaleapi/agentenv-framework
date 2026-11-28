@@ -87,13 +87,11 @@ def test_the_tail_starts_where_the_files_end_and_waits_for_a_whole_line(tmp_path
     tail = claude_bridge.SessionTail("sess-1", set(), set())
     with transcript.open("ab") as file:
         file.write(_lines(_assistant("new")) + b'{"type": "assist')
-    records, files, shapes = tail.read()
-    assert [record["uuid"] for _, record in records] == ["new"]
-    assert tail.read()[0] == records
-    tail.advance(files, shapes)
+    assert [record["uuid"] for _, record in tail.read()] == ["new"]
+    assert tail.read() == []
     with transcript.open("ab") as file:
         file.write(b'ant", "uuid": "torn"}\n')
-    assert [record["uuid"] for _, record in tail.read()[0]] == ["torn"]
+    assert [record["uuid"] for _, record in tail.read(final=True)] == ["torn"]
 
 
 def test_the_tail_takes_sub_agent_transcripts_new_or_old_by_their_agent(tmp_path, monkeypatch):
@@ -107,7 +105,7 @@ def test_the_tail_takes_sub_agent_transcripts_new_or_old_by_their_agent(tmp_path
     with (subagents / "agent-old.jsonl").open("ab") as file:
         file.write(_lines(_assistant("later")))
     (subagents / "agent-new.jsonl").write_bytes(_lines(_shape("h2"), _assistant("first")))
-    fed = tail.read()[0]
+    fed = tail.read()
     assert [(name, record.get("uuid"), record.get("agentId")) for name, record in fed] == [
         ("tools", None, "new"), ("session", "first", "new"), ("session", "later", "old")]
 
@@ -121,7 +119,7 @@ def test_a_transcript_the_scrub_replaced_is_followed_by_its_line_count(tmp_path,
     claude_bridge.scrub_session_transcript("sess-1")
     with transcript.open("ab") as file:
         file.write(_lines(_assistant("after")))
-    assert [record["uuid"] for _, record in tail.read()[0]] == ["after"]
+    assert [record["uuid"] for _, record in tail.read()] == ["after"]
 
 
 def _transcript_writing(scripted, per_spawn):  # noqa: F811
@@ -209,7 +207,7 @@ def test_a_transcript_rewritten_under_the_same_inode_is_followed_by_its_line_cou
                           _assistant("seen"), _assistant("after")))
         file.truncate()
     assert transcript.stat().st_ino == inode
-    assert [record["uuid"] for _, record in tail.read()[0]] == ["after"]
+    assert [record["uuid"] for _, record in tail.read()] == ["after"]
 
 
 def test_a_new_document_is_fed_the_latest_shape_its_transcript_already_held(tmp_path, monkeypatch):
@@ -218,11 +216,9 @@ def test_a_new_document_is_fed_the_latest_shape_its_transcript_already_held(tmp_
     shapes = {(None, "h2")}
     plain = claude_bridge.SessionTail("sess-1", set(), set(shapes))
     fresh = claude_bridge.SessionTail("sess-1", set(), set(), new_document=True)
-    records, files, seen = fresh.read()
-    assert plain.read()[0] == []
-    assert [(name, record["shapeHash"]) for name, record in records] == [("tools", "h2")]
-    fresh.advance(files, seen)
-    assert fresh.read()[0] == []
+    assert plain.read() == []
+    assert [(name, record["shapeHash"]) for name, record in fresh.read()] == [("tools", "h2")]
+    assert fresh.read() == []
 
 
 def test_a_task_that_opens_a_new_document_feeds_its_tools_again(turns, client, monkeypatch):
@@ -252,7 +248,7 @@ def test_the_tail_never_holds_a_whole_transcript(tmp_path, monkeypatch):
         transcript.write_bytes(rewritten)
         del rewritten
         tracemalloc.start()
-        records, _, _ = tail.read()
+        records = tail.read()
         read = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()

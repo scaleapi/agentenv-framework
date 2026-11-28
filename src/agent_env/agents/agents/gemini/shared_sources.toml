@@ -1,0 +1,3 @@
+# What this image's build context takes from agent-env's own sources, at the name its Dockerfile copies it from: one
+# copy of each, shared with the other images that take it (utils/docker/context.py). Paths are under src/agent_env.
+tail_follow = "utils/tail_follow"

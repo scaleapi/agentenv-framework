@@ -20,7 +20,9 @@ RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund --loglevel=error && 
 COPY requirements.txt model-requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -r model-requirements.txt
 # install.sh and run.sh are install/v1's: in the image, so they stay in its build context.
-COPY a2a_server.py gemini_atif.py gemini_bridge.py gemini_changelog.py gemini_config.py gemini_kit.py entrypoint.sh install.sh run.sh ./
+COPY a2a_server.py gemini_atif.py gemini_bridge.py gemini_changelog.py gemini_config.py gemini_kit.py gemini_transcript.py entrypoint.sh install.sh run.sh ./
+# The follower that feeds the atif/1 adapter the transcript, one copy every following agent takes (shared_sources.toml).
+COPY tail_follow/tail_follow.py ./
 # The CLI's cwd and file-tool boundary, /workspace, and its state, fixed so neither follows the uid: Modal runs the
 # image as root. /app is kept, empty and writable, for tasks that name it.
 RUN useradd --create-home --uid 10001 agent && mkdir -p /workspace/inputs /app /home/agent/.gemini \

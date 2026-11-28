@@ -22,6 +22,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from agent_egress import clock_armed, egress_env
+from tail_follow import following
 from kit import in_thread_to_its_end
 
 logger = logging.getLogger(__name__)
@@ -513,10 +514,10 @@ class SessionTail:
     """One turn's new transcript records, its sub-agents' transcripts' too, as the CLI appends them, each as the ATIF
     adapter's aux record (``session_aux``). It starts where each file ends, so an earlier turn isn't fed again, and
     finds its place in a file the scrub replaced between attempts by its line count, which a redaction keeps; a file is
-    taken as replaced when its inode or the line before the place it was read to changed.
-    ``read`` only reads; ``advance`` commits what it read, so a read abandoned midway is read again. For a new
-    document, ``new_document``, the first read also gives the latest request shape the transcript already held, which
-    the CLI writes once per session. Where it reads a whole file it reads it in pieces, since a long computer-use
+    taken as replaced when its inode or the line before the place it was read to changed. Each read moves past what
+    it gives, since the follower feeds every read it makes (``tail_follow``). For a new document, ``new_document``, the
+    first read also gives the latest request shape the transcript already held, which the CLI writes once per
+    session. Where it reads a whole file it reads it in pieces, since a long computer-use
     session's transcript holds each screenshot twice."""
 
     def __init__(self, session_id: str, on_stdout: Collection[str], shapes: set[tuple[str | None, str]], *,
@@ -539,34 +540,27 @@ class SessionTail:
         subagents = sorted(self._subagents.glob(f"{_SUBAGENT_PREFIX}*.jsonl")) if self._subagents.is_dir() else []
         return ([self._main] if self._main.exists() else []) + subagents
 
-    def read(self) -> tuple[list[tuple[str, dict]], dict[Path, _TailedFile], set[tuple[str | None, str]]]:
-        """The aux records the files gained since the last ``advance``, where each file is read to, and the request
-        shapes fed then."""
+    def read(self, final: bool = False) -> list[tuple[str, dict]]:
+        """The aux records the files gained since the last read. The transcript has no end of its own to read to, so a
+        final read is like any other."""
         records: list[tuple[str, dict]] = []
-        files: dict[Path, _TailedFile] = {}
-        shapes = set(self._shapes)
-        if self._earlier_shape is not None and (fed := session_aux(self._earlier_shape, None, (), shapes)):
+        if self._earlier_shape is not None and (fed := session_aux(self._earlier_shape, None, (), self._shapes)):
             records.append(fed)
+        self._earlier_shape = None
         for path in self._paths():
             try:
-                tailed, lines = self._new_lines(path, self._files.get(path))
+                self._files[path], lines = self._new_lines(path, self._files.get(path))
             except OSError:
                 continue
-            files[path] = tailed
             agent_id = path.stem.removeprefix(_SUBAGENT_PREFIX) if path.parent == self._subagents else None
             for raw in lines:
                 try:
                     record = json.loads(raw)
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
-                if isinstance(record, dict) and (fed := session_aux(record, agent_id, self._on_stdout, shapes)):
+                if isinstance(record, dict) and (fed := session_aux(record, agent_id, self._on_stdout, self._shapes)):
                     records.append(fed)
-        return records, files, shapes
-
-    def advance(self, files: Mapping[Path, _TailedFile], shapes: set[tuple[str | None, str]]) -> None:
-        self._files.update(files)
-        self._shapes.update(shapes)
-        self._earlier_shape = None
+        return records
 
     @staticmethod
     def _new_lines(path: Path, tailed: _TailedFile | None) -> tuple[_TailedFile, list[bytes]]:
@@ -654,35 +648,6 @@ def _ends_in(file, tailed: _TailedFile) -> bool:
         return True
     file.seek(tailed.offset - len(tailed.last))
     return file.read(len(tailed.last)) == tailed.last
-
-
-async def _stop_following(following: asyncio.Task, tail: SessionTail, feed: Callable[[str, Any], None]) -> None:
-    """Stop following once the CLI has exited, then feed what its transcripts gained since the last read. A follower
-    that failed is logged; the turn goes on without its records."""
-    following.cancel()
-    try:
-        await following
-    except asyncio.CancelledError:
-        if (current := asyncio.current_task()) is not None and current.cancelling():
-            raise
-    except Exception:
-        logger.warning("following the session transcript failed; the ATIF copy lacks its later records", exc_info=True)
-        return
-    await _feed_tail(tail, feed)
-
-
-async def _follow(tail: SessionTail, feed: Callable[[str, Any], None]) -> None:
-    """Feed ``tail``'s records while the CLI runs."""
-    while True:
-        await _feed_tail(tail, feed)
-        await asyncio.sleep(SESSION_POLL_S)
-
-
-async def _feed_tail(tail: SessionTail, feed: Callable[[str, Any], None]) -> None:
-    records, files, shapes = await asyncio.to_thread(tail.read)
-    tail.advance(files, shapes)
-    for name, record in records:
-        feed(name, record)
 
 
 def _one_line(text: str) -> str:
@@ -782,15 +747,13 @@ async def run_claude(
                              else max(int(deadline - time.monotonic()) - _DEADLINE_HEADROOM_S, 1))
         # Each scrub ends before the turn does, cancelled or not: a later turn on the context mustn't start while it
         # can still replace the transcript that turn appends to.
-        following = asyncio.create_task(_follow(tail, aux_callback)) if tail is not None else None
+        follow = following(tail.read, aux_callback, SESSION_POLL_S, "session transcript") if tail is not None \
+            else contextlib.nullcontext()
         try:
-            result = await spawn(prompt=attempt_prompt, session_id=attempt_session, resume=attempt_resume,
-                                 timeout_s=attempt_timeout_s)
-            if following is not None:
-                await _stop_following(following, tail, aux_callback)
+            async with follow:
+                result = await spawn(prompt=attempt_prompt, session_id=attempt_session, resume=attempt_resume,
+                                     timeout_s=attempt_timeout_s)
         finally:
-            if following is not None:
-                following.cancel()
             await in_thread_to_its_end(scrub_session_transcript, attempt_session)
         if result.session_id != attempt_session:
             await in_thread_to_its_end(scrub_session_transcript, result.session_id)

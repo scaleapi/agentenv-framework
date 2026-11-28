@@ -45,7 +45,7 @@ def test_every_file_the_image_copies_is_in_the_folder():
     assert copied and all(_in_context(name) for name in copied), copied
     # install.sh and run.sh are install/v1's; a build context pruned to what the Dockerfile reads keeps them so.
     assert {"a2a_server.py", "codex_atif.py", "codex_bridge.py", "codex_config.py", "codex_date.py", "codex_kit.py",
-            "entrypoint.sh", "install.sh", "run.sh", "package.json", "package-lock.json"} <= set(copied)
+            "codex_rollout.py", "entrypoint.sh", "install.sh", "run.sh", "package.json", "package-lock.json"} <= set(copied)
 
 
 def _imported(path) -> set[str]:

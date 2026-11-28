@@ -12,7 +12,7 @@ import zlib
 import pytest
 from agentenv_protocol.atif import Fed, RecordedTask, TurnContext, check_adapter, profile_of
 
-from tst.unit.agents.codex.agent import AGENT_DIR, codex_atif, codex_bridge
+from tst.unit.agents.codex.agent import AGENT_DIR, codex_atif, codex_rollout
 
 CodexAtif = codex_atif.CodexAtif
 MAIN, SUB = "01a2-main", "01a2-sub"
@@ -40,7 +40,7 @@ class Feed:
         Feed.clock += 1
         record = {"timestamp": f"2026-11-25T16:15:{Feed.clock // 1000:02d}.{Feed.clock % 1000:03d}Z", "type": kind,
                   "payload": payload}
-        fed = codex_bridge.rollout_aux(record, thread, parent)
+        fed = codex_rollout.rollout_aux(record, thread, parent)
         if fed is not None:
             self.records.append(Fed(fed, aux="rollout"))
         return self

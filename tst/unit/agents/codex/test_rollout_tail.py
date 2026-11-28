@@ -1,14 +1,13 @@
-"""The bridge's rollout tail, which feeds Codex's atif/1 adapter: each turn's new rollout records, its thread's and
-its sub-agents', as the CLI appends them, and ``run_codex`` feeding them while the CLI runs and the rest once it has
-exited."""
+"""The rollout tail that feeds Codex's atif/1 adapter (``codex_rollout``): each turn's new rollout records, its
+thread's and its sub-agents', as the CLI appends them, and ``run_codex`` feeding them while the CLI runs and the rest
+once it has exited."""
 import asyncio
 import json
 import os
-import threading
 
 import pytest
 
-from tst.unit.agents.codex.agent import codex_bridge
+from tst.unit.agents.codex.agent import codex_bridge, codex_rollout
 
 MAIN = "01a21385-2388-7b60-adb8-331c882b4e9a"
 SUB = "01a21385-2cea-7b83-9a89-8cd36b7ffe19"
@@ -21,6 +20,11 @@ def sessions(monkeypatch, tmp_path):
     folder.mkdir(parents=True)
     monkeypatch.setattr(codex_bridge, "SESSIONS_DIR", tmp_path / "sessions")
     return folder
+
+
+def tail_for(thread):
+    """The tail a turn on ``thread`` (None for a new one) follows, over the rollouts the fixture puts in place."""
+    return codex_rollout.RolloutTail(thread, codex_bridge.SESSIONS_DIR, codex_bridge.find_rollout_path)
 
 
 def meta(thread, parent=None):
@@ -53,14 +57,14 @@ def rollout(folder, thread):
 def test_a_new_threads_rollout_is_read_from_its_start_and_a_resumed_ones_from_where_it_ended(sessions):
     path = rollout(sessions, MAIN)
     write(path, meta(MAIN), item("one"))
-    tail = codex_bridge.RolloutTail(None)
+    tail = tail_for(None)
     tail.bind(MAIN)
 
     first = tail.read()
     assert [record["type"] for record in first] == ["session_meta", "response_item"]
     assert all(record["thread"] == MAIN and "parent" not in record for record in first)
 
-    resumed = codex_bridge.RolloutTail(MAIN)
+    resumed = tail_for(MAIN)
     assert resumed.read() == []
     write(path, item("two"))
     assert texts(resumed.read()) == ["two"]
@@ -69,7 +73,7 @@ def test_a_new_threads_rollout_is_read_from_its_start_and_a_resumed_ones_from_wh
 def test_a_line_the_cli_is_still_writing_waits_for_its_end(sessions):
     path = rollout(sessions, MAIN)
     write(path, meta(MAIN), partial=json.dumps(item("half"))[:30])
-    tail = codex_bridge.RolloutTail(None)
+    tail = tail_for(None)
     tail.bind(MAIN)
 
     assert texts(tail.read()) == []
@@ -79,7 +83,7 @@ def test_a_line_the_cli_is_still_writing_waits_for_its_end(sessions):
 
 def test_sub_agents_rollouts_are_found_at_any_depth_and_marked_with_their_parent(sessions):
     write(rollout(sessions, MAIN), meta(MAIN))
-    tail = codex_bridge.RolloutTail(None)
+    tail = tail_for(None)
     tail.bind(MAIN)
     tail.read()
     write(rollout(sessions, SUB), meta(SUB, MAIN), item("sub"))
@@ -96,7 +100,7 @@ def test_sub_agents_rollouts_are_found_at_any_depth_and_marked_with_their_parent
 
 def test_a_sub_agents_rollout_seen_before_its_parents_is_followed_once_its_parent_is(sessions):
     write(rollout(sessions, MAIN), meta(MAIN))
-    tail = codex_bridge.RolloutTail(None)
+    tail = tail_for(None)
     tail.bind(MAIN)
     write(rollout(sessions, DEEPER), meta(DEEPER, SUB), item("deeper"))
     assert texts(tail.read(final=True)) == []
@@ -118,7 +122,7 @@ def test_a_forked_sub_agents_rollout_leaves_out_what_it_copied_from_its_parent(s
     reply = {**item("one"), "payload": {**item("one")["payload"],
                                         "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"}}}
     write(rollout(sessions, MAIN), meta(MAIN), started("turn-1"), call("call_1", "turn-1"), reply, started("turn-2"))
-    tail = codex_bridge.RolloutTail(None)
+    tail = tail_for(None)
     tail.bind(MAIN)
     tail.read()
     forked = {**meta(SUB, MAIN), "payload": {**meta(SUB, MAIN)["payload"], "forked_from_id": MAIN}}
@@ -134,7 +138,7 @@ def test_a_forked_sub_agents_rollout_leaves_out_what_it_copied_from_its_parent(s
 def test_a_replaced_rollout_is_read_on_from_its_line_count(sessions):
     path = rollout(sessions, MAIN)
     write(path, meta(MAIN), item("one"))
-    tail = codex_bridge.RolloutTail(MAIN)
+    tail = tail_for(MAIN)
     replacement = path.with_suffix(".tmp")
     write(replacement, meta(MAIN), item("one"), item("two"))
     os.replace(replacement, path)
@@ -150,12 +154,12 @@ def test_a_replaced_rollout_is_read_on_from_its_line_count(sessions):
     {"type": "event_msg", "payload": {"type": "item_completed"}},
 ])
 def test_records_the_adapter_doesnt_read_are_left_out(record):
-    assert codex_bridge.rollout_aux({"timestamp": "2026-11-25T16:23:43.000Z", **record}, MAIN) is None
+    assert codex_rollout.rollout_aux({"timestamp": "2026-11-25T16:23:43.000Z", **record}, MAIN) is None
 
 
 def test_a_usage_record_keeps_its_response_and_its_counts_alone():
     usage = {"input_tokens": 13350, "cached_input_tokens": 13184, "output_tokens": 90}
-    fed = codex_bridge.rollout_aux({"timestamp": "2026-11-25T16:23:44.676Z", "type": "token_usage_record",
+    fed = codex_rollout.rollout_aux({"timestamp": "2026-11-25T16:23:44.676Z", "type": "token_usage_record",
                                     "payload": {"thread_id": MAIN, "response_id": "resp_1", "usage": usage,
                                                 "turn_token_usage": usage, "thread_token_usage": usage}}, MAIN)
 
@@ -199,7 +203,7 @@ def test_run_codex_feeds_the_turns_rollout_while_the_cli_runs_and_the_rest_once_
         if event["type"] == "thread.started":
             write(path, meta(MAIN), item("one"))
         elif event["type"] == "turn.completed":
-            await asyncio.sleep(codex_bridge.ROLLOUT_POLL_S * 4)
+            await asyncio.sleep(codex_rollout.ROLLOUT_POLL_S * 4)
             seen_before_exit.append(len(fed))
             write(path, item("two"))
 
@@ -219,37 +223,3 @@ def test_run_codex_feeds_the_turns_rollout_while_the_cli_runs_and_the_rest_once_
     assert {name for name, _ in fed} == {"rollout"}
     assert texts([record for _, record in fed]) == ["one", "two"]
     assert seen_before_exit == [2]
-
-
-class _SlowTail:
-    """A tail whose second read is still running when the follower is told to stop."""
-
-    def __init__(self):
-        self.reads, self.release, self.reading = 0, threading.Event(), threading.Event()
-
-    def read(self, *, final=False):
-        if final:
-            return [{"type": "final"}]
-        self.reads += 1
-        if self.reads == 2:
-            self.reading.set()
-            self.release.wait(5)
-            return [{"type": "in flight"}]
-        return [{"type": "first"}] if self.reads == 1 else []
-
-
-def test_a_read_in_flight_when_following_stops_is_fed_before_the_final_one():
-    tail, fed = _SlowTail(), []
-
-    async def follow():
-        stopped = asyncio.Event()
-        following = asyncio.create_task(codex_bridge.follow_rollout(tail, lambda name, r: fed.append(r), stopped))
-        await asyncio.to_thread(tail.reading.wait, 5)
-        stopping = asyncio.create_task(codex_bridge.stop_following_rollout(following, stopped))
-        await asyncio.sleep(0.05)
-        tail.release.set()
-        await stopping
-
-    asyncio.run(follow())
-
-    assert [record["type"] for record in fed] == ["first", "in flight", "final"]
