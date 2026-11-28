@@ -11,6 +11,7 @@ import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from agentenv_protocol.a2a_agent import ModelUsage, Usage
@@ -34,26 +35,55 @@ class Refusal(Exception):
     """A model call the relay answers itself, with this reason, rather than forward."""
 
 
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def stamp(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 @dataclass
 class Calls:
     """The model calls a relay forwarded: each answered call's model, as its request named it, and usage, read as
     ``Usage.from_model_response`` reads one, and how many were answered without usage or refused. A refused call (an
-    error status, or none at all) counts nothing."""
+    error status, or none at all) counts nothing. With ``sink``, each call is also handed to it as it ends, as an
+    ``agentenv.model_call`` record (its model, status, outcome, counts, and when it started and ended by ``clock``),
+    which a bridge feeds its atif/1 adapter as aux; a sink that raises is logged, never the call's failure."""
 
     answered: list[tuple[str | None, Usage]] = field(default_factory=list)
     unreported: int = 0
     refused: int = 0
+    sink: Callable[[dict[str, Any]], None] | None = None
+    clock: Callable[[], datetime] = utc_now
 
-    def add(self, status: int | None, usage: Usage | None, model: str | None = None) -> None:
+    def add(self, status: int | None, usage: Usage | None, model: str | None = None, *,
+            started: datetime | None = None) -> None:
         """A call that ended with ``status`` (None when it had none), the usage its answer carried and the model its
         request named."""
         if status is None or status >= 400:
             self.refused += 1
-            return
-        if usage is None:
+            outcome = "refused"
+        elif usage is None:
             self.unreported += 1
+            outcome = "unreported"
         else:
             self.answered.append((model, usage))
+            outcome = "answered"
+        if self.sink is None:
+            return
+        record: dict[str, Any] = {"type": "agentenv.model_call", "via": "relay", "model": model, "status": status,
+                                  "outcome": outcome}
+        if outcome == "answered":
+            record["usage"] = {**{name: getattr(usage, name) for name in _COUNTS if getattr(usage, name) is not None},
+                               "input_includes_cache": usage.input_includes_cache}
+        if started is not None:
+            record["started"] = stamp(started)
+        record["timestamp"] = stamp(self.clock())
+        try:
+            self.sink(record)
+        except Exception:
+            logger.warning("the model relay's call sink failed; the atif/1 copy lacks this call", exc_info=True)
 
     def usage(self, tool_call_count: int, model: str | None = None) -> Usage:
         """The calls' usage summed, with ``input_tokens`` counting the cache, and the calls without usage counted in
@@ -192,6 +222,7 @@ async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str]
             outgoing["accept-encoding"] = "identity"
             call = request.method == "POST" and path.rstrip("/").endswith(_CALL_ROUTES)
             status, reader, body = None, AnswerReader(), b""
+            started = calls.clock() if call and calls.sink is not None else None
             try:
                 body = await request.read()
                 if call and rewrite is not None:
@@ -233,7 +264,7 @@ async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str]
                 raise
             finally:
                 if call:
-                    calls.add(status, reader.usage(), _request_model(body))
+                    calls.add(status, reader.usage(), _request_model(body), started=started)
 
         app = web.Application(client_max_size=_MAX_REQUEST_BYTES)
         app.router.add_route("*", "/{token}/{path:.*}", forward)
