@@ -1,4 +1,5 @@
 # The image installs the newest agentenv-framework-protocol at or above this floor; a release doesn't pin it, so the
-# image is built again only when this folder changes. The floor is the first whose Usage takes the prompt cache's
-# counts (cache_read_tokens, cache_write_tokens, input_includes_cache); raise it when the agent needs a newer protocol.
-agentenv-framework-protocol[agent]>=0.1.597
+# image is built again only when this folder changes. The floor is the release the atif/1 adapter is written against,
+# with compaction tokens, tool definitions and a task's builds_atif and starts_document; raise it when the agent needs a
+# newer protocol.
+agentenv-framework-protocol[agent]>=0.1.670
