@@ -502,7 +502,9 @@ export function TaskInstanceViewer({
             id: string;
             score: number;
             result: boolean;
-            message: string;
+            message?: string;
+            description?: string;
+            weight?: number;
             title?: string;
             justification?: string;
           }[];
@@ -1099,6 +1101,9 @@ export function TaskInstanceViewer({
                         >
                           Score: {(v.score * 100).toFixed(0)}%
                         </span>
+                        <code className="text-[10px] font-mono text-[var(--muted-foreground)]">
+                          {verifierId}
+                        </code>
                       </div>
 
                       {results.map((r, i) => (
@@ -1122,6 +1127,14 @@ export function TaskInstanceViewer({
                             <span className="text-sm font-semibold">
                               {(r.id ?? `check ${i + 1}`).replace(/_/g, ' ')}
                             </span>
+                            {typeof r.weight === 'number' && r.weight < 0 && (
+                              <span
+                                className="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600"
+                                title={`Penalty check (weight −${Math.abs(r.weight)}): weighted_average subtracts (1 − score) × ${Math.abs(r.weight)} from the weighted sum, ${Number(penaltySubtracted(r.score, r.result, r.weight).toFixed(2))} here`}
+                              >
+                                penalty −{Math.abs(r.weight)}
+                              </span>
+                            )}
                             {typeof r.score === 'number' && r.score !== 0 && r.score !== 1 && (
                               <span className="text-xs text-[var(--muted-foreground)]">
                                 score:{' '}
@@ -1131,9 +1144,9 @@ export function TaskInstanceViewer({
                               </span>
                             )}
                           </div>
-                          {r.message ? (
+                          {(r.message ?? r.description) ? (
                             <p className="text-xs text-[var(--muted-foreground)] whitespace-pre-wrap">
-                              {r.message}
+                              {r.message ?? r.description}
                             </p>
                           ) : null}
                         </div>
@@ -1400,6 +1413,12 @@ function AggregateScoreCard({
       )}
     </div>
   );
+}
+
+/** What weighted_average subtracts for a penalty check, as scoring.py computes it: (1 − score) × |weight|, the score
+ * the check's own or else 1 when it passed and 0 when it didn't. */
+function penaltySubtracted(score: number | undefined, result: boolean, weight: number): number {
+  return (1 - (typeof score === 'number' ? score : result ? 1 : 0)) * Math.abs(weight);
 }
 
 /** Sandbox-side verifier outcomes from a `verify_sandbox` step. Per-criterion rows show the criterion
