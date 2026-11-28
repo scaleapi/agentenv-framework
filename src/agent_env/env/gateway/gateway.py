@@ -93,6 +93,7 @@ from .rest_proxy import (
     WebsiteRoute,
     declared_site_names,
     called_tools,
+    canonical_path,
     fallback_name,
     served_names,
     website_card_name,
@@ -229,7 +230,7 @@ class Gateway:
         self._control_token_children = frozenset(control_token_children)
         self._child_bearers = {name: f"Bearer {token}".encode() for name, token in (child_control_tokens or {}).items()}
         self._token_paths = token_paths(internal_mcp_servers, self.website_urls, self.rest_proxy_urls,
-                                        self._control_token_children | self._child_bearers.keys())
+                                        {*self._control_token_children, *self._child_bearers})
         self._consoles = dict(console_urls or {}) if control_token else {}
         self._console_session = ConsoleSession(control_token) if PGWEB_CONSOLE in self._consoles else None
         self._console_csp = " ".join(["frame-ancestors 'self'", *console_frame_ancestors]).encode()
@@ -1911,12 +1912,11 @@ def _normalized(path: str) -> str:
 
 def reserved_site_path(path: str, reserved: frozenset[str] = frozenset()) -> bool:
     """Whether ``path``, as a site's server would route it, is its data plane or its env card, or one of the paths
-    ``reserved`` names (``site_reserved_paths``), or under one, ignoring case, as some servers route and the /svc
-    guard (``is_child_mcp_path``) judges."""
-    normalized = _normalized(path).lower()
-    return normalized == WELL_KNOWN_PATH.lower() or any(
+    ``reserved`` names (``site_reserved_paths``), or under one, judged as the /svc guard judges (``canonical_path``)."""
+    normalized = canonical_path(path)
+    return normalized == canonical_path(WELL_KNOWN_PATH) or any(
         normalized == base or normalized.startswith(base.rstrip("/") + "/")
-        for base in (reserved_path.lower() for reserved_path in (RPC_PATH, *reserved)))
+        for base in map(canonical_path, (RPC_PATH, *reserved)))
 
 
 def route_environment_name(key: str, base_url: str, servers: list[InternalMCPServer], *, website: bool) -> str:

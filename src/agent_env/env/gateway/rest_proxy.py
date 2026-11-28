@@ -292,9 +292,14 @@ def is_child_mcp_path(decoded_rest: str, endpoint: str = "mcp") -> bool:
     >>> [is_child_mcp_path(p, "/tools/mcp/") for p in ("tools/mcp", "tools/x/../mcp", "Tools/Mcp", "mcp")]
     [True, True, True, False]
     """
-    normalized = posixpath.normpath("/" + decoded_rest.lstrip("/")).lower()
-    at = posixpath.normpath("/" + endpoint.strip("/")).lower()
+    normalized, at = canonical_path(decoded_rest), canonical_path(endpoint)
     return normalized == at or normalized.startswith(at + "/")
+
+
+def canonical_path(path: str) -> str:
+    """``path`` as the gateway's guards judge it, on /svc and /website alike: rooted, its dot segments and doubled
+    slashes resolved, as httpx resolves them on the way upstream, and in lower case, as some servers route."""
+    return posixpath.normpath("/" + path.lstrip("/")).lower()
 
 
 def reaches_child_mcp(request: HTTPConnection, base_url: str, endpoint: str = "mcp") -> bool:
