@@ -29,9 +29,6 @@ from tst.manual.atif_recording import SECRET, build, http, mask, run, save, star
 
 HERE = Path(__file__).resolve().parent
 FAULT_PROXY = REPO / "tst" / "manual" / "codex_gemini_atif" / "fault_proxy.py"
-NETWORK = "atif-recording"
-BROWSER = "atif-recording-playwright"
-FAULTS = "atif-recording-faults"
 PYTHON = "public.ecr.aws/docker/library/python:3.12-slim"
 PLAYWRIGHT_MCP = ("mcr.microsoft.com/playwright/mcp:v0.0.86"
                   "@sha256:2dfc17e08e8db54678ec965ce9ffb4100be0aa68135774d761bac9035ceb6668")
@@ -60,6 +57,19 @@ def spec_of(agent: str) -> dict:
     return importlib.import_module(f"tst.manual.agents_atif.specs.{agent.replace('-', '_')}").SPEC
 
 
+def network_of(spec: dict) -> str:
+    """Each agent's recording has a network, fault proxy and browser of its own, so several record at once."""
+    return f"atif-recording-{spec['image']}"
+
+
+def faults_of(spec: dict) -> str:
+    return f"{network_of(spec)}-faults"
+
+
+def browser_of(spec: dict) -> str:
+    return f"{network_of(spec)}-playwright"
+
+
 def scenarios_of(spec: dict) -> dict:
     chosen = {name: COMMON[name] for name in spec.get("scenarios", COMMON)}
     return {**chosen, **spec.get("own", {})}
@@ -67,10 +77,10 @@ def scenarios_of(spec: dict) -> dict:
 
 def start_agent(spec: dict, image: str, name: str, scenario: dict) -> str:
     mode = scenario.get("faults")
-    endpoint = f"http://{FAULTS}:{FAULT_PORTS[mode]}" if mode else os.environ["LITELLM_BASE_URL"]
+    endpoint = f"http://{faults_of(spec)}:{FAULT_PORTS[mode]}" if mode else os.environ["LITELLM_BASE_URL"]
     env = [arg for key, value in spec.get("env", {}).items() for arg in ("-e", f"{key}={value}")]
     run(["docker", "rm", "-f", name])
-    start(["docker", "run", "-d", "--name", name, "--network", NETWORK, "-p", "127.0.0.1::8000", "-e", "A2A_PORT=8000",
+    start(["docker", "run", "-d", "--name", name, "--network", network_of(spec), "-p", "127.0.0.1::8000", "-e", "A2A_PORT=8000",
            "-e", "LITELLM_API_KEY", "-e", f"LITELLM_BASE_URL={endpoint}", *env, image])
     base = f"http://{run(['docker', 'port', name, '8000']).stdout.splitlines()[0]}"
     for _ in range(120):
@@ -90,7 +100,7 @@ def record(agent: str, spec: dict, image: str, name: str, scenario: dict, out: P
         config = {"model": spec["model"], "timeout_seconds": 600, **spec.get("config", {}), **scenario.get("config", {})}
         posts = [("/ext/agent-config", config), ("/ext/trajectory/prescribe", {"formats": ["atif/1"]})]
         if scenario.get("browser") and not spec.get("posts"):
-            posts.append(("/ext/mcp-config", {"url": f"http://{BROWSER}:8931/mcp", "name": "browser"}))
+            posts.append(("/ext/mcp-config", {"url": f"http://{browser_of(spec)}:8931/mcp", "name": "browser"}))
         posts += spec["posts"](scenario) if spec.get("posts") else []
         for path, body in posts:
             status, answer = http("POST", base + path, body)
@@ -135,25 +145,26 @@ def main() -> None:
     (args.out / args.agent).mkdir(parents=True, exist_ok=True)
     (args.out / args.agent / "cli_version.txt").write_text(version.stdout.strip())
     services = spec["services"]() if spec.get("services") else {}
-    run(["docker", "network", "create", NETWORK])
+    network, faults, browser = network_of(spec), faults_of(spec), browser_of(spec)
+    run(["docker", "network", "create", network])
     try:
-        start(["docker", "run", "-d", "--rm", "--name", FAULTS, "--network", NETWORK, "--entrypoint", "python3",
+        start(["docker", "run", "-d", "--rm", "--name", faults, "--network", network, "--entrypoint", "python3",
                "-e", f"UPSTREAM={os.environ['LITELLM_BASE_URL']}", "-v", f"{FAULT_PROXY}:/p.py:ro",
                PYTHON, "/p.py", "0.0.0.0", *map(str, FAULT_PORTS.values())])
         if any(every[name].get("browser") for name in names) and not spec.get("posts"):
-            start(["docker", "run", "-d", "--rm", "--name", BROWSER, "--network", NETWORK, "--init", PLAYWRIGHT_MCP,
+            start(["docker", "run", "-d", "--rm", "--name", browser, "--network", network, "--init", PLAYWRIGHT_MCP,
                    "--headless", "--host", "0.0.0.0", "--port", "8931", "--allowed-hosts", "*", "--isolated",
                    "--no-sandbox", "--image-responses", "allow"])
         for service, command in services.items():
-            start(["docker", "run", "-d", "--rm", "--name", service, "--network", NETWORK, *command])
+            start(["docker", "run", "-d", "--rm", "--name", service, "--network", network, *command])
         for name in names:
             try:
                 record(args.agent, spec, image, name, every[name], args.out)
             except Exception as exc:
                 print(args.agent, name, "failed:", mask(f"{type(exc).__name__}: {exc}")[:800], flush=True)
     finally:
-        run(["docker", "rm", "-f", FAULTS, BROWSER, *services])
-        run(["docker", "network", "rm", NETWORK])
+        run(["docker", "rm", "-f", faults, browser, *services])
+        run(["docker", "network", "rm", network])
 
 
 if __name__ == "__main__":

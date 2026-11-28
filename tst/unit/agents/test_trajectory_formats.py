@@ -3,8 +3,6 @@
 that left ``native`` out would keep serving trajectories its card can't describe. One with an ATIF adapter offers atif/1
 too, after native."""
 import importlib
-import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
@@ -15,9 +13,11 @@ import agent_env
 AGENTS_DIR = Path(agent_env.__file__).parent / "agents" / "agents"
 #: Each bundled agent's native format, and where its tests import the module holding its agent class.
 #: The agents with an ATIF adapter, whose cards offer atif/1 beside native.
-SERVES_ATIF = {"claude-code", "codex", "gemini"}
+SERVES_ATIF = {"antigravity", "browser-use", "claude-code", "codex", "gemini", "hermes", "letta-code", "opencode",
+               "openhands", "pi", "pydantic-ai"}
 AGENTS = {
     "antigravity": ("antigravity-sdk/1", "tst.unit.agents.antigravity.agent", "a2a_server"),
+    "browser-use": ("browser-use-messages/1", "tst.unit.agents.browser_use.agent", "a2a_server"),
     "claude-code": ("claude-code-stream-json/1", "tst.unit.agents.claude_code.agent", "a2a_server"),
     "codex": ("codex-exec-json/1", "tst.unit.agents.codex.agent", "a2a_server"),
     "gemini": ("gemini-stream-json/1", "tst.unit.agents.gemini.agent", "a2a_server"),
@@ -41,7 +41,7 @@ def _trajectory(module) -> object:
 
 def test_every_bundled_agent_is_listed():
     folders = sorted(path.parent.name for path in AGENTS_DIR.glob("*/requirements.txt"))
-    assert folders == sorted([*AGENTS, "browser-use"])
+    assert folders == sorted(AGENTS)
 
 
 @pytest.mark.parametrize("agent", sorted(AGENTS))
@@ -52,14 +52,3 @@ def test_a_bundled_agent_declares_its_native_trajectory_format(agent):
     formats = [native, "atif/1"] if agent in SERVES_ATIF else [native]
     assert dict(activation.wire_params) == {"formats": formats, "native": native, "default": native}
 
-
-def test_browser_use_declares_its_native_trajectory_format():
-    # browser-use's own test stubs its runtime before importing it, so the module is read here by its path.
-    name = "browser_use_a2a_server"
-    module = sys.modules.get(name)
-    if module is None:
-        spec = importlib.util.spec_from_file_location(name, AGENTS_DIR / "browser-use" / "a2a_server.py")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
-        spec.loader.exec_module(module)
-    assert _trajectory(module).options["native"] == module.TRAJECTORY_FORMAT == "browser-use-messages/1"
