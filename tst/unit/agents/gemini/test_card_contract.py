@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from tst.unit.agents.gemini.agent import AGENT_DIR, PYTHONPATH, a2a_server
 from tst.unit.agents.gemini.support import card
 
@@ -216,7 +217,15 @@ def test_install_params(app):
     assert params["required_params_host"] == ["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *endpoint]
     assert params["install_commands"] == a2a_server._INSTALL_COMMANDS
     assert params["install_commands_host"] == a2a_server._INSTALL_COMMANDS_HOST
-    assert (params["workdir_host"], params["user_host"]) == ("/workspace", "root")
+    assert (params["workdir_host"], params["user_host"]) == ("/app", "root")
+
+
+def test_a_host_install_on_a_local_sandbox_works_in_the_sandboxs_own_folder(tmp_path):
+    """A local sandbox runs a host install on this machine as this user, who can't make a folder at the root: the
+    workspace the install names is the one it maps to a folder of its own."""
+    command = a2a_server._INSTALL_COMMANDS_HOST[-1]
+    assert command.endswith(f" {a2a_server._HOST_WORKDIR}")
+    assert LocalSandbox(work_dir=tmp_path)._rewrite_app_script(command).endswith(f" {tmp_path}")
 
 
 def test_the_card_and_health_are_served(client):
