@@ -514,10 +514,10 @@ class SessionTail:
     """One turn's new transcript records, its sub-agents' transcripts' too, as the CLI appends them, each as the ATIF
     adapter's aux record (``session_aux``). It starts where each file ends, so an earlier turn isn't fed again, and
     finds its place in a file the scrub replaced between attempts by its line count, which a redaction keeps; a file is
-    taken as replaced when its inode or the line before the place it was read to changed.
-    ``read`` only reads; ``advance`` commits what it read, so a read abandoned midway is read again. For a new
-    document, ``new_document``, the first read also gives the latest request shape the transcript already held, which
-    the CLI writes once per session. Where it reads a whole file it reads it in pieces, since a long computer-use
+    taken as replaced when its inode or the line before the place it was read to changed. Each read moves past what
+    it gives, since the follower feeds every read it makes (``tail_follow``). For a new document, ``new_document``, the
+    first read also gives the latest request shape the transcript already held, which the CLI writes once per
+    session. Where it reads a whole file it reads it in pieces, since a long computer-use
     session's transcript holds each screenshot twice."""
 
     def __init__(self, session_id: str, on_stdout: Collection[str], shapes: set[tuple[str | None, str]], *,
@@ -540,40 +540,26 @@ class SessionTail:
         subagents = sorted(self._subagents.glob(f"{_SUBAGENT_PREFIX}*.jsonl")) if self._subagents.is_dir() else []
         return ([self._main] if self._main.exists() else []) + subagents
 
-    def read(self) -> tuple[list[tuple[str, dict]], dict[Path, _TailedFile], set[tuple[str | None, str]]]:
-        """The aux records the files gained since the last ``advance``, where each file is read to, and the request
-        shapes fed then."""
+    def read(self, final: bool = False) -> list[tuple[str, dict]]:
+        """The aux records the files gained since the last read. The transcript has no end of its own to read to, so a
+        final read is like any other."""
         records: list[tuple[str, dict]] = []
-        files: dict[Path, _TailedFile] = {}
-        shapes = set(self._shapes)
-        if self._earlier_shape is not None and (fed := session_aux(self._earlier_shape, None, (), shapes)):
+        if self._earlier_shape is not None and (fed := session_aux(self._earlier_shape, None, (), self._shapes)):
             records.append(fed)
+        self._earlier_shape = None
         for path in self._paths():
             try:
-                tailed, lines = self._new_lines(path, self._files.get(path))
+                self._files[path], lines = self._new_lines(path, self._files.get(path))
             except OSError:
                 continue
-            files[path] = tailed
             agent_id = path.stem.removeprefix(_SUBAGENT_PREFIX) if path.parent == self._subagents else None
             for raw in lines:
                 try:
                     record = json.loads(raw)
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
-                if isinstance(record, dict) and (fed := session_aux(record, agent_id, self._on_stdout, shapes)):
+                if isinstance(record, dict) and (fed := session_aux(record, agent_id, self._on_stdout, self._shapes)):
                     records.append(fed)
-        return records, files, shapes
-
-    def advance(self, files: Mapping[Path, _TailedFile], shapes: set[tuple[str | None, str]]) -> None:
-        self._files.update(files)
-        self._shapes.update(shapes)
-        self._earlier_shape = None
-
-    def take(self, final: bool = False) -> list[tuple[str, dict]]:
-        """What ``read`` gives, committed: the follower feeds every read it makes (``tail_follow``). The transcript has
-        no end of its own to read to, so a final read is like any other."""
-        records, files, shapes = self.read()
-        self.advance(files, shapes)
         return records
 
     @staticmethod
@@ -761,7 +747,7 @@ async def run_claude(
                              else max(int(deadline - time.monotonic()) - _DEADLINE_HEADROOM_S, 1))
         # Each scrub ends before the turn does, cancelled or not: a later turn on the context mustn't start while it
         # can still replace the transcript that turn appends to.
-        follow = following(tail.take, aux_callback, SESSION_POLL_S, "session transcript") if tail is not None \
+        follow = following(tail.read, aux_callback, SESSION_POLL_S, "session transcript") if tail is not None \
             else contextlib.nullcontext()
         try:
             async with follow:
