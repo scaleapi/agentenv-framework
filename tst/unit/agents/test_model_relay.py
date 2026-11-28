@@ -87,6 +87,7 @@ def _through_relay(answers, exercise, **relay_options):
     it returned, the relay's calls and the endpoint."""
     endpoint, calls = Endpoint(), model_relay.Calls()
     endpoint.answers = list(answers)
+    endpoint.calls = calls
 
     async def run():
         runner, upstream = await _serve(endpoint)
@@ -170,12 +171,16 @@ def test_a_call_whose_cli_hung_up_is_read_to_its_end_and_counted():
 
 
 def test_a_call_whose_cli_hung_up_before_the_answer_began_is_still_counted():
+    """Only the wait for the answer times out, so a slow connect under load isn't taken for the hang-up, and the call
+    is waited for until the relay has counted it."""
     async def exercise(client, root, endpoint):
         endpoint.hold_headers = asyncio.Event()
         with pytest.raises(httpx.ReadTimeout):
-            await client.post(f"{root}/v1/chat/completions", json={}, timeout=0.3)
+            await client.post(f"{root}/v1/chat/completions", json={}, timeout=httpx.Timeout(10, read=0.3))
         endpoint.hold_headers.set()
-        await asyncio.sleep(0.3)
+        async with asyncio.timeout(10):
+            while not endpoint.calls.answered:
+                await asyncio.sleep(0.02)
 
     _, calls, _ = _through_relay([(200, CLAUDE_STREAM, "text/event-stream")], exercise)
 
