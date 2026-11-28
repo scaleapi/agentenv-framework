@@ -10,35 +10,46 @@ import asyncio
 import time
 import uuid
 
+from agent_env.config import get_config
 from agent_env.runner import store as run_store
 from agent_env.runner.runner import RunStatus
+from agent_env.store import Filter
 from agent_env.task import Task
 from agent_env.task.store import find_task_instance
 from agent_env.task_step.task_step import TaskStep
 
 ENDED_WITHIN_SECONDS = 60
 POLL_SECONDS = 0.05
+# How long the step a submitter stops under naps, and so how long a run that outlives it takes to end.
+OUTLIVED_NAP_SECONDS = 1
+ATTEMPTS_COLLECTION = "runner_conformance_attempts"
 
 
 class Step(TaskStep):
     """Naps ``nap`` seconds, fails unless the run's metadata sets each key in ``needs``, and records that it ran
-    under its id."""
+    under its id. With ``flaky`` set it records each attempt under that marker, and its first attempt fails as an
+    infrastructure failure does, with a ConnectionError."""
 
     type = "runner_conformance"
     entity_refs = ()
 
-    def __init__(self, nap=0, needs=(), **base):
+    def __init__(self, nap=0, needs=(), flaky=None, **base):
         super().__init__(**base)
-        self.nap, self.needs = nap, list(needs)
+        self.nap, self.needs, self.flaky = nap, list(needs), flaky
 
     @classmethod
     def from_dict(cls, data):
-        return cls(**cls._base_from_dict(data), nap=data.get("nap", 0), needs=data.get("needs", []))
+        return cls(**cls._base_from_dict(data), nap=data.get("nap", 0), needs=data.get("needs", []),
+                   flaky=data.get("flaky"))
 
     def to_dict(self):
-        return {**super().to_dict(), "nap": self.nap, "needs": self.needs}
+        return {**super().to_dict(), "nap": self.nap, "needs": self.needs, "flaky": self.flaky}
 
     async def execute(self, context):
+        if self.flaky:
+            get_config().get_document_store().insert(ATTEMPTS_COLLECTION, {"flaky": self.flaky})
+            if _attempts(self.flaky) == 1:
+                raise ConnectionError("the conformance step's first attempt lost its connection")
         await asyncio.sleep(self.nap)
         if missing := [key for key in self.needs if not context.metadata.get(key)]:
             raise RuntimeError(f"conformance step needs {missing}")
@@ -95,12 +106,42 @@ async def a_run_it_does_not_have_or_that_ended_cannot_be_cancelled(runner):
     assert await runner.status(f"no-such-run-{uuid.uuid4().hex}") is None
 
 
+async def a_run_outlives_its_submitter_only_when_the_runner_says_so(runner):
+    """A runner whose runs outlive their submitter finishes one after ``stop``, so an eval resumed later reattaches to
+    it; any other leaves it unfinished, so the eval submits it again."""
+    task = _put(Step(id="a", version=None, nap=OUTLIVED_NAP_SECONDS))
+    handle = await runner.submit(task.id, task.version)
+    await _until(runner, handle.run_id, lambda record: record.status is not RunStatus.QUEUED)
+    await runner.stop()
+    if runner.runs_outlive_submitter:
+        assert (await _until_recorded(handle.run_id)).status is RunStatus.COMPLETED
+    else:
+        await asyncio.sleep(2 * OUTLIVED_NAP_SECONDS)
+        assert run_store.get_run(handle.run_id).status is not RunStatus.COMPLETED
+
+
+async def a_run_is_retried_after_an_infrastructure_failure_only_when_the_runner_says_so(runner):
+    """A runner that retries infrastructure failures runs a run again after one, so the eval engine adds no attempt
+    of its own; any other ends the run failed after one attempt, so the engine's attempt is the only one."""
+    marker = uuid.uuid4().hex
+    task = _put(Step(id="a", version=None, flaky=marker))
+    handle = await runner.submit(task.id, task.version)
+    record = await _until_ended(runner, handle.run_id)
+    if runner.retries_infra:
+        assert record.status is RunStatus.COMPLETED and _attempts(marker) >= 2
+    else:
+        assert (record.status, _attempts(marker)) == (RunStatus.FAILED, 1)
+        assert "ConnectionError" in record.error
+
+
 CASES = [
     a_run_completes_and_is_recorded_under_its_handle,
     a_run_whose_step_fails_fails_with_its_error,
     a_cancelled_run_ends_canceled,
     a_run_given_an_instance_continues_it_from_start_step,
     a_run_it_does_not_have_or_that_ended_cannot_be_cancelled,
+    a_run_outlives_its_submitter_only_when_the_runner_says_so,
+    a_run_is_retried_after_an_infrastructure_failure_only_when_the_runner_says_so,
 ]
 
 
@@ -110,6 +151,19 @@ def _put(*steps) -> Task:
 
 async def _until_ended(runner, run_id):
     return await _until(runner, run_id, lambda record: record.status.is_terminal)
+
+
+async def _until_recorded(run_id):
+    """The run's index record once it ends, read from the store rather than a runner that has stopped."""
+    deadline = time.monotonic() + ENDED_WITHIN_SECONDS
+    while not (record := run_store.get_run(run_id)).status.is_terminal:
+        assert time.monotonic() < deadline, f"run {run_id} is still {record.status}"
+        await asyncio.sleep(POLL_SECONDS)
+    return record
+
+
+def _attempts(marker: str) -> int:
+    return get_config().get_document_store().count(ATTEMPTS_COLLECTION, Filter.of(flaky=marker))
 
 
 async def _until(runner, run_id, done):
