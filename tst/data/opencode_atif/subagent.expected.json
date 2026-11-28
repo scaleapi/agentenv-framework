@@ -1,0 +1,178 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-opencode-subagent",
+ "agent": {
+  "name": "OpenCode",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:55:07.800392Z",
+   "source": "user",
+   "message": "Use your task tool to start a general sub-agent that runs `wc -l /etc/passwd` and reports the count back to you. Then reply with only that number.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-opencode-subagent",
+     "task_id": "4a35aaee-b3d3-4d75-9b02-975dfef50b20",
+     "message_id": "4bf9eb3497a943c4ba33a0e4959146a1",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:55:10.801Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 604,
+    "cached_tokens": 0,
+    "completion_tokens": 9,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:55:10.495Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_014vVG6fKrV476AA4xwBc7ES",
+     "function_name": "task",
+     "arguments": {
+      "subagent_type": "general",
+      "description": "Run wc command on passwd file",
+      "prompt": "Run the command `wc -l /etc/passwd` and report back the exact number of lines (the count) from the output. Only return the numerical count in your final message."
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_014vVG6fKrV476AA4xwBc7ES",
+      "content": "<task id=\"ses_ddf10454fffetSUqCU7z3uhXYG\" state=\"completed\">\n<task_result>\n21\n</task_result>\n</task>",
+      "subagent_trajectory_ref": [
+       {
+        "trajectory_id": "ses_ddf10454fffetSUqCU7z3uhXYG"
+       }
+      ]
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 9349,
+    "cached_tokens": 8988,
+    "completion_tokens": 133,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 358
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:55:15.210Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "21",
+   "metrics": {
+    "prompt_tokens": 9540,
+    "cached_tokens": 9346,
+    "completion_tokens": 4,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 189
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "subagent_trajectories": [
+  {
+   "schema_version": "ATIF-v1.8",
+   "trajectory_id": "ses_ddf10454fffetSUqCU7z3uhXYG",
+   "agent": {
+    "name": "general",
+    "version": "unknown",
+    "model_name": "anthropic/claude-haiku-4-5"
+   },
+   "steps": [
+    {
+     "step_id": 1,
+     "timestamp": "2026-11-28T06:55:12.425Z",
+     "source": "agent",
+     "model_name": "anthropic/claude-haiku-4-5",
+     "message": "",
+     "metrics": {
+      "prompt_tokens": 8430,
+      "cached_tokens": 0,
+      "completion_tokens": 59,
+      "extra": {
+       "agentenv": {
+        "cache_write_tokens": 8427
+       }
+      }
+     },
+     "llm_call_count": 1
+    },
+    {
+     "step_id": 2,
+     "timestamp": "2026-11-28T06:55:14.617Z",
+     "source": "agent",
+     "model_name": "anthropic/claude-haiku-4-5",
+     "message": "21",
+     "metrics": {
+      "prompt_tokens": 8508,
+      "cached_tokens": 8427,
+      "completion_tokens": 4,
+      "extra": {
+       "agentenv": {
+        "cache_write_tokens": 75
+       }
+      }
+     },
+     "llm_call_count": 1
+    }
+   ]
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 36431,
+  "total_completion_tokens": 209,
+  "total_cached_tokens": 26761,
+  "total_steps": 4,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 9049
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "opencode-events/1",
+   "adapter": {
+    "name": "opencode-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

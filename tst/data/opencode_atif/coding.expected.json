@@ -1,0 +1,274 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-opencode-coding",
+ "agent": {
+  "name": "OpenCode",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:54:19.543885Z",
+   "source": "user",
+   "message": "Create hello.py that prints the sum of the integers 1 to 100, run it with python3, and reply with only the number it prints.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-opencode-coding",
+     "task_id": "72c57e36-cb96-460b-940c-34b2519e15c3",
+     "message_id": "4f0814cf7cc14deea17b70830570f34f",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:54:22.296Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 599,
+    "cached_tokens": 0,
+    "completion_tokens": 14,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:54:22.839Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_019QoRA1EtQb5RR4BmHt5jmU",
+     "function_name": "write",
+     "arguments": {
+      "filePath": "/app/hello.py",
+      "content": "print(sum(range(1, 101)))\n"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_019QoRA1EtQb5RR4BmHt5jmU",
+      "content": "Wrote file successfully."
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 9344,
+    "cached_tokens": 0,
+    "completion_tokens": 86,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 9341
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:54:23.780Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "Now let me run it:",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_016JfpTtfHDs6WBSFF81ApQW",
+     "function_name": "bash",
+     "arguments": {
+      "command": "python3 /app/hello.py"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_016JfpTtfHDs6WBSFF81ApQW",
+      "content": "5050\n"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 9446,
+    "cached_tokens": 9341,
+    "completion_tokens": 66,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 100
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-28T06:54:24.779Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "5050",
+   "metrics": {
+    "prompt_tokens": 9527,
+    "cached_tokens": 9441,
+    "completion_tokens": 5,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 80
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-28T06:54:24.907140Z",
+   "source": "agent",
+   "message": "Now let me run it:\n5050",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  },
+  {
+   "step_id": 7,
+   "timestamp": "2026-11-28T06:54:25.578926Z",
+   "source": "user",
+   "message": "Now change it to sum 1 to 1000, run it again, and reply with only the number.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-opencode-coding",
+     "task_id": "02cad381-127c-4696-a4dd-203db51344a0",
+     "message_id": "aaa462a735684fdc9c0305f5c85c92ae",
+     "turn": 1
+    }
+   }
+  },
+  {
+   "step_id": 8,
+   "timestamp": "2026-11-28T06:54:28.452Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01RwsebYyjBMQtETeosqa2Ah",
+     "function_name": "edit",
+     "arguments": {
+      "filePath": "/app/hello.py",
+      "oldString": "print(sum(range(1, 101)))",
+      "newString": "print(sum(range(1, 1001)))"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01RwsebYyjBMQtETeosqa2Ah",
+      "content": "Edit applied successfully."
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 9559,
+    "cached_tokens": 9521,
+    "completion_tokens": 115,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 35
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 9,
+   "timestamp": "2026-11-28T06:54:29.590Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_0179nUWc5HLf7c7hVrPTCHU5",
+     "function_name": "bash",
+     "arguments": {
+      "command": "python3 /app/hello.py"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_0179nUWc5HLf7c7hVrPTCHU5",
+      "content": "500500\n"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 9689,
+    "cached_tokens": 9556,
+    "completion_tokens": 59,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 128
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 10,
+   "timestamp": "2026-11-28T06:54:30.483Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "500500",
+   "metrics": {
+    "prompt_tokens": 9763,
+    "cached_tokens": 9684,
+    "completion_tokens": 5,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 73
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 57927,
+  "total_completion_tokens": 350,
+  "total_cached_tokens": 47543,
+  "total_steps": 10,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 9757
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "opencode-events/1",
+   "adapter": {
+    "name": "opencode-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

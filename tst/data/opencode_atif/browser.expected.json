@@ -1,0 +1,188 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-opencode-browser",
+ "agent": {
+  "name": "OpenCode",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:54:34.160914Z",
+   "source": "user",
+   "message": "Use the browser tools to open https://example.com, then call the screenshot tool with no filename so the image comes back to you, and reply with the main heading you see in it.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-opencode-browser",
+     "task_id": "696bcd1a-aab6-4d92-acf2-55cc108a5991",
+     "message_id": "33c0bbd8f1fb4d95a5ea922843620826",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:54:36.470Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "",
+   "metrics": {
+    "prompt_tokens": 605,
+    "cached_tokens": 0,
+    "completion_tokens": 9,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:54:37.076Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "I'll open the website and take a screenshot for you.",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01Rp8FWzrT8fprmPoazBWHFs",
+     "function_name": "browser_browser_navigate",
+     "arguments": {
+      "url": "https://example.com"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01Rp8FWzrT8fprmPoazBWHFs",
+      "content": "### Ran Playwright code\n```js\nawait page.goto('https://example.com');\n```\n### Page\n- Page URL: https://example.com/\n- Page Title: Example Domain\n### Snapshot\n- [Snapshot](../tmp/.playwright-mcp/page-2026-11-28T06-54-38-087Z.yml)"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 14518,
+    "cached_tokens": 0,
+    "completion_tokens": 72,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 14515
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:54:38.671Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "Now let me take a screenshot:",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01DMc4VdyPkGBatLKYbBhmNM",
+     "function_name": "browser_browser_take_screenshot",
+     "arguments": {
+      "scale": "css"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01DMc4VdyPkGBatLKYbBhmNM",
+      "content": [
+       {
+        "type": "text",
+        "text": "### Result\n- [Screenshot of viewport](../tmp/.playwright-mcp/page-2026-11-28T06-54-39-621Z.png)\n### Ran Playwright code\n```js\n// Screenshot viewport and save it as ../tmp/.playwright-mcp/page-2026-11-28T06-54-39-621Z.png\nawait page.screenshot({\n  path: '../tmp/.playwright-mcp/page-2026-11-28T06-54-39-621Z.png',\n  scale: 'css',\n  type: 'png'\n});\n```"
+       },
+       {
+        "type": "image",
+        "source": {
+         "media_type": "image/png",
+         "path": "media/8757b6f760d44b0bb96f10cac556a38aec68c21fb7f8a715ece0cb6e02148c6d.png"
+        }
+       }
+      ],
+      "extra": {
+       "agentenv": {
+        "media": {
+         "media/8757b6f760d44b0bb96f10cac556a38aec68c21fb7f8a715ece0cb6e02148c6d.png": {
+          "sha256": "8757b6f760d44b0bb96f10cac556a38aec68c21fb7f8a715ece0cb6e02148c6d",
+          "bytes": 73860,
+          "width": 1280,
+          "height": 720
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 14683,
+    "cached_tokens": 14515,
+    "completion_tokens": 65,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 163
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-28T06:54:41.098Z",
+   "source": "agent",
+   "model_name": "anthropic/claude-haiku-4-5",
+   "message": "The main heading visible in the screenshot is not explicitly shown as a large heading. However, based on the page title and content, this is the **Example Domain** page. The page displays explanatory text about the domain being reserved for documentation examples, with the text presented in multiple languages (English, Arabic, Chinese, French, Russian, and Spanish).",
+   "metrics": {
+    "prompt_tokens": 16111,
+    "cached_tokens": 14678,
+    "completion_tokens": 74,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 1430
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-28T06:54:42.304282Z",
+   "source": "agent",
+   "message": "I'll open the website and take a screenshot for you.\nNow let me take a screenshot:\nThe main heading visible in the screenshot is not explicitly shown as a large heading. However, based on the page title and content, this is the **Example Domain** page. The page displays explanatory text about the domain being reserved for documentation examples, with the text presented in multiple languages (English, Arabic, Chinese, French, Russian, and Spanish).",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 45917,
+  "total_completion_tokens": 220,
+  "total_cached_tokens": 29193,
+  "total_steps": 6,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 16108
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "opencode-events/1",
+   "adapter": {
+    "name": "opencode-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

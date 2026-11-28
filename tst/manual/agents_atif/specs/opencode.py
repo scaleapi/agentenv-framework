@@ -1,7 +1,9 @@
 """OpenCode's atif/1 recording: its image, Haiku through the turn's model relay, each context's session store under
-/data/sessions (its opencode.db holds the sub-agents' steps the CLI's events leave out), the pinned CLI's version, and
-beside the common scenarios a sub-agent run through the task tool, and a high reasoning effort, whose thinking the CLI
-prints for a task that builds atif/1."""
+/data/sessions (its opencode.db holds the sub-agents' steps the CLI's events leave out, which the bridge feeds the
+adapter from), the pinned CLI's version, and beside the common scenarios a sub-agent run through the task tool, two run
+at once, and a high reasoning effort, whose thinking the CLI prints for a task that builds atif/1. With claude-haiku-4-5
+at that endpoint a high effort gives no reasoning back: the step's reasoning count is 0, and the session store holds no
+reasoning part."""
 
 SPEC = {
     "image": "agentenv-opencode",

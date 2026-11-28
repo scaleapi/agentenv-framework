@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import signal
+import sqlite3
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -56,6 +57,11 @@ OUTPUT_TOKEN_MAX_ENV = "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"
 # under $HOME so host-mode instances don't share session state.
 SESSIONS_ROOT = os.environ.get("OPENCODE_SESSIONS_ROOT") or os.path.join(os.environ.get("HOME", "/data"), "sessions")
 _CLI_TIMEOUT_S = 120
+# Where the CLI keeps a context's sessions under its data dir, a sub-agent's with the rest (opencode-ai 1.17.18).
+SESSION_STORE = Path("share") / "opencode" / "opencode.db"
+# The event the CLI prints for each kind of part it prints.
+_PART_EVENTS = {"step-start": "step_start", "reasoning": "reasoning", "text": "text", "tool": "tool_use",
+                "step-finish": "step_finish"}
 
 # The CLI version OpenCodeTool names the tools of; a test holds it to package.json's opencode-ai.
 TOOLS_CLI_VERSION = "1.17.18"
@@ -454,7 +460,7 @@ def _descendants(pid: int) -> list[int]:
 
 
 async def run_opencode(prompt: str, context_id: str, *, aux_callback: Callable[[str, dict], None] | None = None,
-                       **kwargs) -> OpencodeResult:
+                       event_callback: Callable[[dict], None] | None = None, **kwargs) -> OpencodeResult:
     """Run one turn, ``_run_opencode``'s, with OpenCode's provider pointed at a model relay of the turn's own, which
     counts every model call the CLI makes: its steps', its subagents' sessions', its compaction's, its title's and its
     answered retries'. The turn's usage is theirs, a call answered without usage counted as unreported. The relay
@@ -462,15 +468,69 @@ async def run_opencode(prompt: str, context_id: str, *, aux_callback: Callable[[
 
     ``aux_callback``, given when the task builds an atif/1 copy, gets the ATIF adapter's aux records: the turn's model
     and effort (``turn``), then each call the relay forwards as it ends (``calls``), on the real time the CLI's events
-    are on; and the CLI prints the model's reasoning too."""
+    are on, and each sub-agent session a task call ran, before that call's event (``subagents``); and the CLI prints
+    the model's reasoning too."""
     calls = Calls() if aux_callback is None else Calls(sink=lambda record: aux_callback("calls", record))
     if aux_callback is not None:
         aux_callback("turn", {"type": "agentenv.turn", "model": kwargs.get("model") or DEFAULT_MODEL,
                               "effort": kwargs.get("effort")})
+        event_callback = _feeding_subagents(context_data_dir(context_id) / SESSION_STORE, aux_callback, event_callback)
     async with model_relay(_base_url(os.environ).removesuffix("/v1"), calls, rewrite=env_date_rewrite) as relay:
-        result = await _run_opencode(prompt, context_id, base_url=relay, thinking=aux_callback is not None, **kwargs)
+        result = await _run_opencode(prompt, context_id, base_url=relay, thinking=aux_callback is not None,
+                                     event_callback=event_callback, **kwargs)
     result.usage = calls.usage(result.tool_call_count, kwargs.get("model"))
     return result
+
+
+def spawned_session(event: dict) -> tuple[str, int] | None:
+    """The sub-agent session an ended task call's event names, and when the call started."""
+    part = event.get("part") if isinstance(event.get("part"), dict) else {}
+    state = part.get("state") if isinstance(part.get("state"), dict) else {}
+    metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+    session, start = metadata.get("sessionId"), (state.get("time") or {}).get("start")
+    ended = state.get("status") in ("completed", "error")
+    if event.get("type") == "tool_use" and part.get("tool") == "task" and ended and isinstance(session, str) \
+            and isinstance(start, int):
+        return session, start
+    return None
+
+
+def subagent_events(store: Path, session: str, since: int) -> list[dict]:
+    """The events the CLI would print for a sub-agent session's model steps since ``since``, as it prints its root
+    session's, which are the only ones it prints: their parts, read from the session store, where the task call that
+    ran them, having ended, left them final."""
+    query = ("SELECT message.data, part.id, part.message_id, part.time_updated, part.data FROM part"
+             " JOIN message ON message.id = part.message_id WHERE part.session_id = ? AND message.time_created >= ?"
+             " ORDER BY message.time_created, message.id, part.id")
+    with contextlib.closing(sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True, timeout=5)) as db:
+        rows = db.execute(query, (session, since)).fetchall()
+    events = []
+    for message, part_id, message_id, at, data in rows:
+        part = json.loads(data)
+        kind = _PART_EVENTS.get(part.get("type"))
+        if kind is not None and json.loads(message).get("role") == "assistant":
+            events.append({"type": kind, "timestamp": at, "sessionID": session,
+                           "part": {**part, "id": part_id, "messageID": message_id, "sessionID": session}})
+    return events
+
+
+def _feeding_subagents(store: Path, aux_callback: Callable[[str, dict], None],
+                       event_callback: Callable[[dict], None] | None) -> Callable[[dict], None]:
+    """``event_callback``, the aux records of the sub-agent session an ended task call ran handed over first. A store
+    that can't be read leaves the copy that session's calls alone, never the turn."""
+    def on_event(event: dict) -> None:
+        if (spawned := spawned_session(event)) is not None:
+            try:
+                events = subagent_events(store, *spawned)
+            except (sqlite3.Error, ValueError):
+                logger.warning("could not read sub-agent session %s from %s; the atif/1 copy has only its calls",
+                               spawned[0], store, exc_info=True)
+            else:
+                aux_callback("subagents", {"type": "agentenv.opencode_session", "session": spawned[0],
+                                           "events": events})
+        if event_callback is not None:
+            event_callback(event)
+    return on_event
 
 
 async def _run_opencode(
