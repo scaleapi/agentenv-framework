@@ -55,7 +55,7 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from pydantic_ai_atif import TURN, PydanticAIAtif, counted
+from pydantic_ai_atif import PydanticAIAtif, counted
 
 PYDANTIC_AI_VERSION: Final[str] = "2.61.0"
 TRAJECTORY_FORMAT: Final[str] = "pydantic-ai-messages/v1"
@@ -185,6 +185,12 @@ def turn_usage(responses: Iterable[Any], *, tool_calls: int, requests: int) -> U
         else:
             calls.append(counts)
     return _summed(calls, tool_calls, {"requests": requests, **({"unreported_calls": unreported} if unreported else {})})
+
+
+def effort_sent(effort: str | None, profile: Mapping[str, Any]) -> str | None:
+    """The effort a model's requests carry: Pydantic AI passes its ``thinking`` setting on only to a model whose profile
+    takes it (``Model._thinking_applies``) and drops it otherwise, as for Claude through an OpenAI-compatible endpoint."""
+    return effort if profile.get("supports_thinking") or profile.get("thinking_always_enabled") else None
 
 
 def _summed(calls: list[tuple[int, ...]], tool_calls: int, details: dict[str, Any]) -> Usage:
@@ -456,8 +462,6 @@ class PydanticAIAgent(AgentEnvAgent):
                 request.trajectory.aux(name, record)
 
         builds_atif = request.trajectory.builds_atif
-        if builds_atif:
-            on_aux(TURN, {"effort": config.effort})
 
         conversation = conversation_id(request.context_id)
         # Bound before the run starts, so a live trajectory read or a mid-turn snapshot finds the conversation.

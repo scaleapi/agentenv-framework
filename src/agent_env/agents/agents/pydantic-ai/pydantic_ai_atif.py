@@ -3,12 +3,12 @@ appends each ModelRequest once it's sent and each ModelResponse once it's answer
 model call, with its own usage, model and time, and the calls it makes are answered by the next request's tool returns.
 
 Three aux files hold what the messages don't, fed only while a task builds an atif/1 copy: the turn's settings
-(``turn``: its reasoning effort); the requests and responses of each run delegate_task starts (``delegated``), which
-keep messages of their own, each naming the run, the call it runs under and that call's run, so a delegated run is a
-sub-agent embedded under its call; and the turn's run failing (``failed``), with the request it had sent, whose tool
-returns never reach the messages, and its error, a step with no model call whose message is the task's reply. A call
-still unanswered when its run ends, a failed or cancelled one's, is answered canceled. This module imports only the
-protocol, so it loads where Pydantic AI isn't installed."""
+(``turn``: the reasoning effort its model's requests carry); the requests and responses of each run delegate_task starts
+(``delegated``), which keep messages of their own, each naming the run, the call it runs under and that call's run, so a
+delegated run is a sub-agent embedded under its call; and the turn's run failing (``failed``), with the request it had
+sent, whose tool returns never reach the messages, and its error, a step with no model call whose message is the task's
+reply. A call still unanswered when its run ends, a failed or cancelled one's, is answered canceled. This module imports
+only the protocol, so it loads where Pydantic AI isn't installed."""
 from __future__ import annotations
 
 import base64

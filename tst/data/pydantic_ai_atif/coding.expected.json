@@ -1,0 +1,249 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-pydantic-ai-coding",
+ "agent": {
+  "name": "Pydantic AI",
+  "version": "2.61.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:54:19.453178Z",
+   "source": "user",
+   "message": "Create hello.py that prints the sum of the integers 1 to 100, run it with python3, and reply with only the number it prints.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-pydantic-ai-coding",
+     "task_id": "3b1dcb0e-b098-433b-9c74-bb8a9860ff3b",
+     "message_id": "1242a2d142e44183977ff81cc11b9f26",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:54:20.280771Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5",
+   "message": "I'll create the hello.py file, run it, and get the result for you.",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01Byj4LaJyoMACdyQWupMSzH",
+     "function_name": "write_file",
+     "arguments": {
+      "path": "hello.py",
+      "content": "print(sum(range(1, 101)))\n"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01Byj4LaJyoMACdyQWupMSzH",
+      "content": "Wrote 26 chars (1 lines) to hello.py."
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 3925,
+    "cached_tokens": 0,
+    "completion_tokens": 103,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:54:21.363863Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5",
+   "message": "Now let me run it:",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01P7GknoJ8JwboZchrb1xhEq",
+     "function_name": "shell",
+     "arguments": {
+      "command": "python3 hello.py"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01P7GknoJ8JwboZchrb1xhEq",
+      "content": "5050\nPID: 12 (supervisor; use `kill -- -12` to stop the whole process tree)\nOutput: /workspace/.pydantic-ai-harness/shell/1f1e70a56bf24be3a88c5ef83bdf1c04/output.log\nStatus: /workspace/.pydantic-ai-harness/shell/1f1e70a56bf24be3a88c5ef83bdf1c04/status.json\n{\"pid\": 12, \"exit_code\": 0}"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 4055,
+    "cached_tokens": 0,
+    "completion_tokens": 63,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-28T06:54:22.352846Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5",
+   "message": "5050",
+   "metrics": {
+    "prompt_tokens": 4256,
+    "cached_tokens": 0,
+    "completion_tokens": 5,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-28T06:54:22.642511Z",
+   "source": "user",
+   "message": "Now change it to sum 1 to 1000, run it again, and reply with only the number.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-pydantic-ai-coding",
+     "task_id": "50695574-1860-47cf-9a5d-cd84c1c7a25d",
+     "message_id": "61d2839319464f89887b7464dfc4af35",
+     "turn": 1
+    }
+   }
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-28T06:54:23.278060Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01FnmmvYNRaVziPMGXMwydtx",
+     "function_name": "edit_file",
+     "arguments": {
+      "path": "hello.py",
+      "old_text": "print(sum(range(1, 101)))",
+      "new_text": "print(sum(range(1, 1001)))"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01FnmmvYNRaVziPMGXMwydtx",
+      "content": "Edited hello.py."
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 4288,
+    "cached_tokens": 0,
+    "completion_tokens": 115,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 7,
+   "timestamp": "2026-11-28T06:54:24.294142Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01VnUe8sDpjThEhAMsVXrVFu",
+     "function_name": "shell",
+     "arguments": {
+      "command": "python3 hello.py"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01VnUe8sDpjThEhAMsVXrVFu",
+      "content": "500500\nPID: 45 (supervisor; use `kill -- -45` to stop the whole process tree)\nOutput: /workspace/.pydantic-ai-harness/shell/cec185837c954f579101268f787f80ed/output.log\nStatus: /workspace/.pydantic-ai-harness/shell/cec185837c954f579101268f787f80ed/status.json\n{\"pid\": 45, \"exit_code\": 0}"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 4420,
+    "cached_tokens": 0,
+    "completion_tokens": 56,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 8,
+   "timestamp": "2026-11-28T06:54:25.105629Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5",
+   "message": "500500",
+   "metrics": {
+    "prompt_tokens": 4600,
+    "cached_tokens": 0,
+    "completion_tokens": 5,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 25544,
+  "total_completion_tokens": 347,
+  "total_cached_tokens": 0,
+  "total_steps": 8,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 0
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "pydantic-ai-messages/v1",
+   "adapter": {
+    "name": "pydantic-ai-messages-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

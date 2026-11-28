@@ -1,0 +1,175 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-pydantic-ai-subagent",
+ "agent": {
+  "name": "Pydantic AI",
+  "version": "2.61.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:55:07.963309Z",
+   "source": "user",
+   "message": "Use your delegate_task tool with agent_name \"self\" to have a sub-agent run `wc -l /etc/passwd` with its shell tool and report the count back to you. Then reply with only that number.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-pydantic-ai-subagent",
+     "task_id": "bd605567-3d1a-481c-975a-41a8699b0471",
+     "message_id": "c3d696ef78b748b99d3a9ac306dba7ea",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:55:09.015525Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_013M1J9ghDtPzWJc8FGZXLgn",
+     "function_name": "delegate_task",
+     "arguments": {
+      "agent_name": "self",
+      "task": "Run the command `wc -l /etc/passwd` and report back the number of lines from the output."
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_013M1J9ghDtPzWJc8FGZXLgn",
+      "content": "The `/etc/passwd` file has **20 lines**.",
+      "subagent_trajectory_ref": [
+       {
+        "trajectory_id": "01a220ef-b26d-7736-9ab4-7038f4feb705"
+       }
+      ]
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 3941,
+    "cached_tokens": 0,
+    "completion_tokens": 95,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:55:11.844481Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5",
+   "message": "20",
+   "metrics": {
+    "prompt_tokens": 4061,
+    "cached_tokens": 0,
+    "completion_tokens": 4,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "subagent_trajectories": [
+  {
+   "schema_version": "ATIF-v1.8",
+   "trajectory_id": "01a220ef-b26d-7736-9ab4-7038f4feb705",
+   "agent": {
+    "name": "Pydantic AI",
+    "version": "2.61.0"
+   },
+   "steps": [
+    {
+     "step_id": 1,
+     "timestamp": "2026-11-28T06:55:10.034536Z",
+     "source": "agent",
+     "model_name": "claude-haiku-4-5",
+     "message": "",
+     "tool_calls": [
+      {
+       "tool_call_id": "toolu_vrtx_01TjWMTpUt3eD2LGYSvqWe7G",
+       "function_name": "shell",
+       "arguments": {
+        "command": "wc -l /etc/passwd"
+       }
+      }
+     ],
+     "observation": {
+      "results": [
+       {
+        "source_call_id": "toolu_vrtx_01TjWMTpUt3eD2LGYSvqWe7G",
+        "content": "20 /etc/passwd\nPID: 12 (supervisor; use `kill -- -12` to stop the whole process tree)\nOutput: /workspace/.pydantic-ai-harness/shell/fbd18f99762c44a9be7068c5172c7231/output.log\nStatus: /workspace/.pydantic-ai-harness/shell/fbd18f99762c44a9be7068c5172c7231/status.json\n{\"pid\": 12, \"exit_code\": 0}"
+       }
+      ]
+     },
+     "metrics": {
+      "prompt_tokens": 3916,
+      "cached_tokens": 0,
+      "completion_tokens": 59,
+      "extra": {
+       "agentenv": {
+        "cache_write_tokens": 0
+       }
+      }
+     },
+     "llm_call_count": 1
+    },
+    {
+     "step_id": 2,
+     "timestamp": "2026-11-28T06:55:11.191417Z",
+     "source": "agent",
+     "model_name": "claude-haiku-4-5",
+     "message": "The `/etc/passwd` file has **20 lines**.",
+     "metrics": {
+      "prompt_tokens": 4111,
+      "cached_tokens": 0,
+      "completion_tokens": 16,
+      "extra": {
+       "agentenv": {
+        "cache_write_tokens": 0
+       }
+      }
+     },
+     "llm_call_count": 1
+    }
+   ]
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 16029,
+  "total_completion_tokens": 174,
+  "total_cached_tokens": 0,
+  "total_steps": 3,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 0
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "pydantic-ai-messages/v1",
+   "adapter": {
+    "name": "pydantic-ai-messages-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

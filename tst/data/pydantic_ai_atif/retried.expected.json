@@ -1,0 +1,115 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-pydantic-ai-retried",
+ "agent": {
+  "name": "Pydantic AI",
+  "version": "2.61.0",
+  "model_name": "anthropic/claude-haiku-4-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-28T06:54:52.600000Z",
+   "source": "user",
+   "message": "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-pydantic-ai-retried",
+     "task_id": "ba1d0034-b260-43ad-b151-171bcf505c93",
+     "message_id": "027a7ffe345445729ba30cef282c1776",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-28T06:54:54.005644Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5",
+   "message": "I'll run both commands for you.",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_0152p7uWPHouZYcsD1q6WCPL",
+     "function_name": "shell",
+     "arguments": {
+      "command": "echo first"
+     }
+    },
+    {
+     "tool_call_id": "toolu_vrtx_0152iUrLvaNGEPg58gXZsYtc",
+     "function_name": "shell",
+     "arguments": {
+      "command": "echo second"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_0152p7uWPHouZYcsD1q6WCPL",
+      "content": "first\nPID: 17 (supervisor; use `kill -- -17` to stop the whole process tree)\nOutput: /workspace/.pydantic-ai-harness/shell/ebb418e5fd5c4a0c9d5c800cfd1fdf9f/output.log\nStatus: /workspace/.pydantic-ai-harness/shell/ebb418e5fd5c4a0c9d5c800cfd1fdf9f/status.json\n{\"pid\": 17, \"exit_code\": 0}"
+     },
+     {
+      "source_call_id": "toolu_vrtx_0152iUrLvaNGEPg58gXZsYtc",
+      "content": "second\nPID: 15 (supervisor; use `kill -- -15` to stop the whole process tree)\nOutput: /workspace/.pydantic-ai-harness/shell/fcf9f6b6f15f4babaf789d18b7a3ad5d/output.log\nStatus: /workspace/.pydantic-ai-harness/shell/fcf9f6b6f15f4babaf789d18b7a3ad5d/status.json\n{\"pid\": 15, \"exit_code\": 0}"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 3920,
+    "cached_tokens": 0,
+    "completion_tokens": 96,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-28T06:54:56.367011Z",
+   "source": "agent",
+   "model_name": "claude-haiku-4-5",
+   "message": "Both outputs on one line: **first second**",
+   "metrics": {
+    "prompt_tokens": 4331,
+    "cached_tokens": 0,
+    "completion_tokens": 13,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 8251,
+  "total_completion_tokens": 109,
+  "total_cached_tokens": 0,
+  "total_steps": 3,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 0
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "pydantic-ai-messages/v1",
+   "adapter": {
+    "name": "pydantic-ai-messages-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

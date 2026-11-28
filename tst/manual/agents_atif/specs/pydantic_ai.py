@@ -1,10 +1,12 @@
 """Pydantic AI's spec for ``record.py``: the agent's image runs Pydantic AI in its own process, calling Claude Haiku
 through Chat Completions at the endpoint, streamed, and persists each context's messages under
 ``~/.pydantic-ai-a2a/conversations``. Beside the common scenarios, two of its own: a high reasoning effort on a turn with
-no tool call, which Claude answers with thinking that comes back through LiteLLM as ``reasoning_content``, unsigned;
-and a ``delegate_task`` run, which runs the agent again with messages of its own that only the ``delegated`` aux file
-holds. The common ``retried`` scenario's 503s are retried by the OpenAI client inside one model call, which the messages
-never show, so it checks only that the copy still sums to the turn."""
+no tool call, which Pydantic AI sends only to a model whose profile takes ``thinking``, not to Claude through an
+OpenAI-compatible endpoint, so its copy claims no effort and holds no reasoning; and a ``delegate_task`` run, which runs
+the agent again with messages of its own that only the ``delegated`` aux file holds. The common ``retried`` scenario's
+503s are retried by the OpenAI client inside one model call, which the messages never show, so it checks only that the
+copy still sums to the turn; and the ``browser`` scenario's screenshot is cut by the harness's ``Coder`` to 64,000
+characters of JSON text before the model sees it, so it holds no image."""
 
 SPEC = {
     "image": "agentenv-pydantic-ai",

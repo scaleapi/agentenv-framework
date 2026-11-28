@@ -22,8 +22,8 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 from pydantic_ai_harness import Skills
 from pydantic_ai_harness.coder import Coder
 
-from pydantic_ai_agent import MESSAGES, Outcome, Turn, to_completion, turn_usage
-from pydantic_ai_atif import DELEGATE_TOOL, DELEGATED, FAILED
+from pydantic_ai_agent import MESSAGES, Outcome, Turn, effort_sent, to_completion, turn_usage
+from pydantic_ai_atif import DELEGATE_TOOL, DELEGATED, FAILED, TURN
 
 # Consecutive retries a tool gets for arguments it refuses, as many as Coder gives its file tools, so a model that
 # fumbles a command twice doesn't end the task.
@@ -66,7 +66,7 @@ async def _delegating(ctx: Any, /, *, call: Any, tool_def: Any, args: Any, handl
         _DELEGATION.reset(token)
 
 
-def _agent(turn: Turn, responses: list[ModelResponse]) -> Agent:
+def _agent(turn: Turn, model: OpenAIChatModel, responses: list[ModelResponse]) -> Agent:
     """The turn's agent, which puts every model response it gets in ``responses``: its own, and those of the runs it
     delegates to with delegate_task, which run this agent again with messages of their own, so they're never in the
     turn's messages, and which it feeds the atif/1 copy when the task builds one. Listed last, the recorder is the first
@@ -90,7 +90,7 @@ def _agent(turn: Turn, responses: list[ModelResponse]) -> Agent:
         for name, registration in turn.mcp_servers.items()
     ]
     return Agent(
-        _model(turn),
+        model,
         instructions=turn.config.system_prompt,
         model_settings=_settings(turn),
         retries={"tools": _TOOL_RETRIES},
@@ -168,7 +168,10 @@ class PydanticAIRuntime:
         for image in turn.images:
             prompt.append(BinaryContent(data=await asyncio.to_thread(image.path.read_bytes), media_type=image.media_type))
         responses: list[ModelResponse] = []
-        agent = _agent(turn, responses)
+        model = _model(turn)
+        if turn.on_aux is not None:
+            turn.on_aux(TURN, {"effort": effort_sent(turn.config.effort, model.profile)})
+        agent = _agent(turn, model, responses)
         recorded = len(history)
         messages: list[ModelMessage] = list(history)
         usage = RunUsage()

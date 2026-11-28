@@ -565,10 +565,18 @@ def test_the_image_installs_a_protocol_with_the_atif_kit_the_adapter_uses():
     assert "agentenv-framework-protocol[agent]>=0.1.670" in requirements
 
 
+#: Pydantic AI's profile of Claude through an OpenAI-compatible endpoint, and of a model it sends ``thinking`` to.
+CLAUDE_PROFILE = {"supports_thinking": False, "thinking_always_enabled": False}
+THINKING_PROFILE = {"supports_thinking": True, "thinking_always_enabled": False}
+
+
 @dataclass
 class ScriptedRuntime:
-    """Answers each turn with one response, as Claude does through a LiteLLM proxy, and keeps the turns it ran."""
+    """Answers each turn with one response, with the usage Claude's have through a LiteLLM proxy, and keeps the turns it
+    ran; it feeds the turn's settings as the real runtime does, for a model of ``profile``, by default one Pydantic AI
+    sends ``thinking`` to."""
 
+    profile: dict[str, Any] = field(default_factory=lambda: dict(THINKING_PROFILE))
     turns: list[Any] = field(default_factory=list)
 
     async def stop(self) -> None:
@@ -579,6 +587,9 @@ class ScriptedRuntime:
 
     async def run(self, turn: Any) -> Any:
         self.turns.append(turn)
+        if turn.on_aux is not None:
+            turn.on_aux(pydantic_ai_atif.TURN, {"effort": pydantic_ai_agent.effort_sent(turn.config.effort,
+                                                                                        self.profile)})
         turn.on_event(request(prompt(turn.text)))
         turn.on_event(response(text("Done."), usage=counts(13, 43, **CLAUDE_SECOND)))
         usage = pydantic_ai_agent.turn_usage([SimpleNamespace(input_tokens=13, output_tokens=43, cache_read_tokens=0,
@@ -588,9 +599,10 @@ class ScriptedRuntime:
 
 
 @contextmanager
-def serving(tmp_path, prescribe: bool) -> Iterator[tuple[ScriptedRuntime, dict, TestClient]]:
-    """The agent on the scripted runtime, having run one task, with atif/1 prescribed or not."""
-    runtime = ScriptedRuntime()
+def serving(tmp_path, prescribe: bool,
+            runtime: ScriptedRuntime | None = None) -> Iterator[tuple[ScriptedRuntime, dict, TestClient]]:
+    """The agent on the scripted runtime, having run one task at effort high, with atif/1 prescribed or not."""
+    runtime = runtime or ScriptedRuntime()
     agent = pydantic_ai_agent.PydanticAIAgent(runtime, endpoint=pydantic_ai_agent.Endpoint("http://litellm.test"),
                                               home=tmp_path / "home", workspace=tmp_path / "ws")
     with TestClient(agent.create_app(), client=("127.0.0.1", 50000)) as client:
@@ -613,7 +625,7 @@ def test_the_card_offers_atif_beside_its_messages_which_stay_the_default(tmp_pat
     assert params["native"] == params["default"] == "pydantic-ai-messages/v1"
 
 
-def test_a_task_that_builds_atif_feeds_the_turns_settings_and_hands_the_runtime_its_aux(tmp_path):
+def test_a_task_that_builds_atif_hands_the_runtime_its_aux_which_feeds_the_turns_settings(tmp_path):
     with serving(tmp_path, prescribe=True) as (runtime, task, client):
         read = client.post("/ext/trajectory", json={"task_id": task["id"], "format": "atif/1"})
 
@@ -636,3 +648,22 @@ def test_a_task_that_builds_no_atif_hands_the_runtime_no_aux_and_its_messages_st
     assert runtime.turns[0].on_aux is None
     assert [event["kind"] for event in native] == ["request", "response"]
     assert atif.status_code >= 400
+
+
+@pytest.mark.parametrize(("profile", "effort"), [
+    (CLAUDE_PROFILE, None), (THINKING_PROFILE, "high"), ({"thinking_always_enabled": True}, "high"), ({}, None)])
+def test_the_effort_sent_is_the_configured_one_only_for_a_model_whose_profile_takes_thinking(profile, effort):
+    assert pydantic_ai_agent.effort_sent("high", profile) == effort
+    assert pydantic_ai_agent.effort_sent(None, profile) is None
+
+
+def test_an_effort_pydantic_ai_never_sent_the_model_is_not_claimed(tmp_path):
+    """Claude through a LiteLLM proxy is a model whose profile takes no ``thinking``, which Pydantic AI then drops, so
+    its steps ran at no effort whatever agent-config set."""
+    with serving(tmp_path, prescribe=True, runtime=ScriptedRuntime(CLAUDE_PROFILE)) as (runtime, task, client):
+        body = client.post("/ext/trajectory", json={"task_id": task["id"], "format": "atif/1"}).json()
+
+    assert runtime.turns[0].config.effort == "high"
+    assert body["aux"] == [{"name": "turn", "record": {"effort": None}, "after": 0}]
+    (step,) = agent_steps(body["trajectory"])
+    assert "reasoning_effort" not in step
