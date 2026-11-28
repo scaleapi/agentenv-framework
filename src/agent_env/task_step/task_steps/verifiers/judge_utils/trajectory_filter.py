@@ -35,6 +35,10 @@ MIN_FRAME_BUDGET = 2 * FINAL_FRAMES_RESERVED
 # ACTION_LOG line cap (``action_log_max_lines``, see ``frame_selection.action_log``).
 DEFAULT_ACTION_LOG_MAX_LINES = 120
 MIN_ACTION_LOG_MAX_LINES = 10
+# ACTION_LOG per-line cuts of the rendered tool arguments and result.
+DEFAULT_ACTION_LOG_MAX_ARGS_CHARS = 110
+DEFAULT_ACTION_LOG_MAX_RESULT_CHARS = 160
+MIN_ACTION_LOG_FIELD_CHARS = 20
 
 
 class CompactionType(str, Enum):
@@ -113,6 +117,8 @@ class TrajectoryFilter:
     # (e.g. {"submitted": "^submit_form\\b"}); see ``frame_selection`` for the cap.
     always_show_actions: Optional[dict[str, str]] = None
     action_log_max_lines: int = DEFAULT_ACTION_LOG_MAX_LINES    # >= MIN_ACTION_LOG_MAX_LINES
+    action_log_max_args_chars: int = DEFAULT_ACTION_LOG_MAX_ARGS_CHARS      # >= MIN_ACTION_LOG_FIELD_CHARS
+    action_log_max_result_chars: int = DEFAULT_ACTION_LOG_MAX_RESULT_CHARS  # >= MIN_ACTION_LOG_FIELD_CHARS
 
     def __post_init__(self) -> None:
         # Accept plain strings (e.g. constructed from JSON) and coerce to the enums.
@@ -157,6 +163,10 @@ class TrajectoryFilter:
             raise ValueError(
                 f"action_log_max_lines must be an integer >= {MIN_ACTION_LOG_MAX_LINES}, got {lines!r}"
             )
+        for name in ("action_log_max_args_chars", "action_log_max_result_chars"):
+            chars = getattr(self, name)
+            if isinstance(chars, bool) or not isinstance(chars, int) or chars < MIN_ACTION_LOG_FIELD_CHARS:
+                raise ValueError(f"{name} must be an integer >= {MIN_ACTION_LOG_FIELD_CHARS}, got {chars!r}")
 
     def to_dict(self) -> dict:
         return {
@@ -172,6 +182,8 @@ class TrajectoryFilter:
             "evidence_exclude_pattern": self.evidence_exclude_pattern,
             "always_show_actions": dict(self.always_show_actions) if self.always_show_actions is not None else None,
             "action_log_max_lines": self.action_log_max_lines,
+            "action_log_max_args_chars": self.action_log_max_args_chars,
+            "action_log_max_result_chars": self.action_log_max_result_chars,
         }
 
     @classmethod
@@ -189,6 +201,8 @@ class TrajectoryFilter:
             evidence_exclude_pattern=data.get("evidence_exclude_pattern"),
             always_show_actions=data.get("always_show_actions"),
             action_log_max_lines=data.get("action_log_max_lines", DEFAULT_ACTION_LOG_MAX_LINES),
+            action_log_max_args_chars=data.get("action_log_max_args_chars", DEFAULT_ACTION_LOG_MAX_ARGS_CHARS),
+            action_log_max_result_chars=data.get("action_log_max_result_chars", DEFAULT_ACTION_LOG_MAX_RESULT_CHARS),
         )
 
 def compact_otel_trajectory(
