@@ -101,7 +101,7 @@ def test_a_one_model_turns_writes_kept_an_hour_are_priced_at_the_hours_rate(monk
                      "cacheCreationEphemeral1hInputTokens": 1500, "costUSD": 0.004}}
     usage = a2a_server._usage(_result(run_usage=[], model_usage=tally, session_base={}))
     prices = PriceTable({HAIKU: ModelPrice(input=1.0, output=5.0, cache_read=0.1, cache_write=1.25,
-                                           cache_write_ttl={3600: 2.0})}, "litellm@test")
+                                           cache_write_ttl_rates={3600: 2.0})}, "litellm@test")
     monkeypatch.setattr(usage_module, "litellm_prices", lambda: prices)
     context = TaskStepContext()
     steps = StepUsage(context, "solve")

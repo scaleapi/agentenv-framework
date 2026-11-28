@@ -159,9 +159,9 @@ def test_a_turn_whose_rows_cant_all_be_priced_leaves_the_entry_unpriced_rather_t
 
 # The same models with a rate for cache writes kept an hour, as Claude's are.
 HOURLY = PriceTable({SONNET: ModelPrice(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75,
-                                        cache_write_ttl={3600: 6.0}),
+                                        cache_write_ttl_rates={3600: 6.0}),
                      HAIKU: ModelPrice(input=1.0, output=5.0, cache_read=0.1, cache_write=1.25,
-                                       cache_write_ttl={3600: 2.0})},
+                                       cache_write_ttl_rates={3600: 2.0})},
                     "litellm@test")
 
 
@@ -212,7 +212,7 @@ def test_a_turn_on_several_models_whose_rows_say_how_long_their_writes_were_kept
 
 def test_a_row_whose_writes_were_kept_twelve_hours_is_charged_that_times_rate(monkeypatch):
     prices = PriceTable({SONNET: ModelPrice(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75,
-                                            cache_write_ttl={43200: 7.5}),
+                                            cache_write_ttl_rates={43200: 7.5}),
                          HAIKU: ModelPrice(input=1.0, output=5.0, cache_read=0.1, cache_write=1.25)}, "litellm@test")
     sonnet = replace(SONNET_SHARE, cache_write_ttl_tokens={"12h": 500})
 
@@ -225,7 +225,7 @@ def test_a_row_whose_writes_were_kept_twelve_hours_is_charged_that_times_rate(mo
 
 def test_rows_that_give_no_times_take_the_one_time_their_turn_kept_every_write(monkeypatch):
     prices = PriceTable({SONNET: ModelPrice(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75,
-                                            cache_write_ttl={43200: 7.5}),
+                                            cache_write_ttl_rates={43200: 7.5}),
                          HAIKU: ModelPrice(input=1.0, output=5.0, cache_read=0.1, cache_write=1.25)}, "litellm@test")
     twelve = {"cache_write_tokens_details": {"ttl_12h_tokens": 500}}
 

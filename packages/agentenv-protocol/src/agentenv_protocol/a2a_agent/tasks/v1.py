@@ -365,14 +365,9 @@ class NativeTrajectory:
         object.__setattr__(self, "payload", _copy_json_value(self.payload))
 
 
-_USAGE_COUNTERS = (
-    "tool_call_count",
-    "input_tokens",
-    "output_tokens",
-    "total_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-)
+#: ``Usage``'s token counts, each an integer a turn's calls sum.
+TOKEN_COUNTS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens")
+_USAGE_COUNTERS = ("tool_call_count", *TOKEN_COUNTS)
 
 
 # The keys a model response's usage is read by, in any of the shapes ``Usage.from_model_response`` reads.
@@ -386,20 +381,26 @@ def _count(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
+#: The seconds in each unit a time a cache write was kept may be written in, however it's spelled.
+TTL_UNITS = {"s": 1, "sec": 1, "m": 60, "min": 60, "h": 3600, "hr": 3600, "hour": 3600, "d": 86400, "day": 86400}
+#: A pattern for any of ``TTL_UNITS``' spellings, the longest first so a pattern that ends there matches it whole.
+TTL_UNIT_PATTERN = "|".join(sorted(TTL_UNITS, key=len, reverse=True))
 # How long cache writes were kept, as ``cache_write_ttl_tokens`` names it: a count of one unit, ``5m``, ``1h``, ``90s``.
 _TTL_LABEL = re.compile(r"^(\d+)([smhd])$")
-_TTL_UNITS = {"s": 1, "sec": 1, "m": 60, "min": 60, "h": 3600, "hr": 3600, "hour": 3600, "d": 86400, "day": 86400}
 # A provider's count of cache writes kept a while, named for the time: Anthropic's ``ephemeral_1h_input_tokens``,
 # OpenAI's ``ttl_12h_tokens``.
-_TTL_COUNT = re.compile(r"^(?:ephemeral_|ttl_)?(\d+)(s|sec|m|min|h|hr|hour|d|day)(?:_input)?_tokens$")
+_TTL_COUNT = re.compile(rf"^(?:ephemeral_|ttl_)?(\d+)({TTL_UNIT_PATTERN})(?:_input)?_tokens$")
 #: Where ``Usage.from_model_response`` keeps each provider's split of its cache writes by how long they were kept.
 CACHE_WRITE_SPLITS = ("cache_creation", "cache_write_tokens_details")
+
+
+_Time = TypeVar("_Time", str, int)
 
 
 def ttl_seconds(label: Any) -> int | None:
     """The seconds a ``cache_write_ttl_tokens`` label names, ``1h`` as 3600; None for one that names no time."""
     match = _TTL_LABEL.match(label) if isinstance(label, str) else None
-    return int(match[1]) * _TTL_UNITS[match[2]] if match and int(match[1]) > 0 else None
+    return int(match[1]) * TTL_UNITS[match[2]] if match and int(match[1]) > 0 else None
 
 
 def ttl_label(seconds: int) -> str:
@@ -436,18 +437,28 @@ def _ttl_from_splits(details: Mapping[str, Any]) -> dict[str, int] | None:
         split = details.get(name)
         for key, value in split.items() if isinstance(split, Mapping) else ():
             if (match := _TTL_COUNT.match(str(key))) and (count := _count(value)):
-                label = ttl_label(int(match[1]) * _TTL_UNITS[match[2]])
+                label = ttl_label(int(match[1]) * TTL_UNITS[match[2]])
                 counts[label] = counts.get(label, 0) + count
     return counts or None
 
 
-def ttl_sum(parts: Iterable[Mapping[str, int] | None]) -> dict[str, int] | None:
-    """``cache_write_ttl_tokens`` summed by time; None when none of ``parts`` gives one."""
-    total: dict[str, int] = {}
+def ttl_sum(parts: Iterable[Mapping[_Time, int] | None]) -> dict[_Time, int] | None:
+    """Counts by how long cache writes were kept (``cache_write_ttl_tokens``, by label or by seconds) summed by time;
+    None when none of ``parts`` gives one."""
+    total: dict[_Time, int] = {}
     for part in parts:
-        for label, count in (part or {}).items():
-            total[label] = total.get(label, 0) + count
+        for time, count in (part or {}).items():
+            total[time] = total.get(time, 0) + count
     return total or None
+
+
+def ttl_counts_in_seconds(value: Any) -> dict[int, int]:
+    """A ``cache_write_ttl_tokens`` value as stored, by seconds, each time that can't be read or count that isn't a
+    positive integer left out, as a reader of records another version wrote must take them."""
+    if not isinstance(value, Mapping):
+        return {}
+    return ttl_sum({seconds: count} for label, count in value.items()
+                   if (seconds := ttl_seconds(label)) is not None and _count(count)) or {}
 
 
 def _check_counts(record: Any, names: Iterable[str]) -> None:

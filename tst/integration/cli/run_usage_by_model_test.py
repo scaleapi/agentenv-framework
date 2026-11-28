@@ -122,14 +122,14 @@ def test_a_rows_writes_by_time_cross_the_wire_and_are_charged_each_times_rate(bu
     [entry] = run.context.metadata["step_usage"]["prompt"]
     prices = litellm_prices()
     sonnet_rate, haiku_rate = (prices.lookup(row["model"]) for row in TIMED_ROWS)
-    assert sonnet_rate.cache_write_ttl.get(3600, 0) > sonnet_rate.cache_write
-    assert haiku_rate.cache_write_ttl.get(3600, 0) > haiku_rate.cache_write
+    assert sonnet_rate.cache_write_ttl_rates.get(3600, 0) > sonnet_rate.cache_write
+    assert haiku_rate.cache_write_ttl_rates.get(3600, 0) > haiku_rate.cache_write
     expected = [price(Tokens.of(row), None, model=row["model"], prices=prices, reported_by=ReportedBy.HARNESS)
                 for row in TIMED_ROWS]
     sonnet, haiku = entry["models"]
     assert (sonnet["cost_usd"], haiku["cost_usd"]) == pytest.approx([cost.usd for cost in expected])
     assert sonnet["cache_write_ttl_tokens"] == {"1h": 1500} and "cost_assumed" not in sonnet
-    assert sonnet["unit_prices"]["cache_write_1h"] == sonnet_rate.cache_write_ttl[3600]
+    assert sonnet["unit_prices"]["cache_write_1h"] == sonnet_rate.cache_write_ttl_rates[3600]
     assert haiku["cost_assumed"] == ["default_cache_ttl"] and entry["cost_assumed"] == ["default_cache_ttl"]
     assert entry["cache_write_ttl_tokens"] == {"1h": 1500}
     with namespace_routing():

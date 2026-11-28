@@ -3,7 +3,7 @@ set, read back by ``from_dict`` from any protocol version, and carried by a fail
 
 import pytest
 
-from agentenv_protocol.a2a_agent import ttl_label, ttl_seconds
+from agentenv_protocol.a2a_agent import ttl_counts_in_seconds, ttl_label, ttl_seconds, ttl_sum
 from agentenv_protocol.a2a_agent.tasks.v1 import ModelUsage, TaskResult, Usage
 
 FULL = Usage(tool_call_count=2, input_tokens=120, output_tokens=7, total_tokens=127, cache_read_tokens=100,
@@ -182,3 +182,11 @@ def test_a_turn_without_writes_by_time_takes_its_rows_and_a_models_row_sums_its_
     assert Usage(models=rows).cache_write_ttl_tokens == {"1h": 5, "5m": 2}
     assert Usage(models=(rows[0], ModelUsage(model="c", cache_write_tokens=1))).cache_write_ttl_tokens is None
     assert ModelUsage.of("a", calls).cache_write_ttl_tokens == {"1h": 5, "5m": 1}
+
+
+def test_writes_by_time_as_stored_are_read_by_seconds_leaving_out_what_cant_be_read():
+    stored = {"1h": 5, "60m": 2, "soon": 3, "2h": -1, "5m": True, "12h": 4}
+
+    assert ttl_counts_in_seconds(stored) == {3600: 7, 43200: 4}
+    assert ttl_counts_in_seconds(["1h"]) == {} == ttl_counts_in_seconds(None)
+    assert ttl_sum([{3600: 1}, None, {3600: 2, 300: 1}]) == {3600: 3, 300: 1} and ttl_sum([None]) is None

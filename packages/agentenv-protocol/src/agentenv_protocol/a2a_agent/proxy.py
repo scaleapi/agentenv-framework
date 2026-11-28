@@ -19,7 +19,7 @@ import shutil
 import signal
 from collections import defaultdict
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -58,7 +58,9 @@ from .extensions import (
     extension,
 )
 from .framework import AgentEnvAgent, AgentIdentity, a2a_agent
-from .tasks.v1 import AgentConfig, ModelUsage, TaskRequest, TaskResult, TextPart, TrajectoryLog, Usage, ttl_sum
+from .tasks.v1 import (
+    TOKEN_COUNTS, AgentConfig, ModelUsage, TaskRequest, TaskResult, TextPart, TrajectoryLog, Usage, ttl_sum,
+)
 from ..tool_client import ToolResult, ToolSession, ToolSessionError
 from ..transfers import download
 from ..types import EnvironmentTool
@@ -522,8 +524,7 @@ def _tool_error(message: str) -> ProxyToolResult:
     return ProxyToolResult(content=[{"type": "text", "text": f"error: {message}"}], is_error=True)
 
 
-_USAGE_SUMS = (*(f.name for f in fields(Usage) if f.name.endswith("_tokens") and f.name != "cache_write_ttl_tokens"),
-               "cost_usd")
+_USAGE_SUMS = (*TOKEN_COUNTS, "cost_usd")
 # Each provider's split of its cache writes by how long they're kept, which ``Usage.from_model_response`` keeps.
 _CACHE_WRITE_SPLITS = ("cache_creation", "cache_write_tokens_details")
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NotRequired, Optional, TypedDict
 
-from agentenv_protocol.a2a_agent import Usage
+from agentenv_protocol.a2a_agent import Usage, ttl_sum
 
 from agent_env.config.model import ModelRole
 from agent_env.config.model_pricing import (
@@ -232,7 +232,7 @@ def _summed(costs: list[Cost], reported_usd: Optional[float]) -> Cost:
     least = next((cost for cost in costs if cost.status is not CostStatus.PRICED), costs[0])
     assumed = tuple(dict.fromkeys(assumed for cost in costs for assumed in cost.assumed))
     return Cost(sum(cost.usd for cost in costs), least.status, least.source, reported_usd, assumed=assumed,
-                cache_write_ttl=_ttl_total(costs))
+                cache_write_ttl_tokens=ttl_sum(cost.cache_write_ttl_tokens for cost in costs))
 
 
 def _combined(costs: list[Cost]) -> Cost:
@@ -253,16 +253,7 @@ def _combined(costs: list[Cost]) -> Cost:
                 sum(bills) if bills else None,
                 uncached_input=sum(uncached) if priced and None not in uncached else None,
                 unit_prices=next(iter(rates.values())) if len(rates) == 1 else None, assumed=assumed,
-                cache_write_ttl=_ttl_total(priced))
-
-
-def _ttl_total(costs: list[Cost]) -> Optional[dict[str, int]]:
-    """The costs' writes charged above the base write rate, summed by how long they were kept; None when none were."""
-    total: dict[str, int] = {}
-    for cost in costs:
-        for label, count in (cost.cache_write_ttl or {}).items():
-            total[label] = total.get(label, 0) + count
-    return total or None
+                cache_write_ttl_tokens=ttl_sum(c.cache_write_ttl_tokens for c in priced))
 
 
 def _unreported() -> Usage:
